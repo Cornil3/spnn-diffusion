@@ -8,6 +8,7 @@ from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
 from diffusers import AutoencoderKL
+import wandb
 from models import SPNNAutoencoder
 from diagnostics import penrose_check, print_penrose_metrics
 
@@ -25,6 +26,8 @@ def parse_args():
     parser.add_argument("--max_images", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--sample_dir", type=str, default="samples")
+    parser.add_argument("--wandb_project", type=str, default="spnn-vae")
+    parser.add_argument("--wandb_entity", type=str, default="yamitehrlich-technion-israel-institute-of-technology")
     return parser.parse_args()
 
 
@@ -90,6 +93,8 @@ def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sampl
 def train(args):
     print(f"Device: {DEVICE}")
 
+    wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args))
+
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.sample_dir, exist_ok=True)
 
@@ -141,6 +146,11 @@ def train(args):
 
             epoch_loss += loss.item()
 
+            wandb.log({
+                "train/loss": loss.item(),
+                "train/lr": scheduler.get_last_lr()[0],
+            })
+
             pbar.set_postfix({
                 "loss": f"{loss.item():.4f}",
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
@@ -150,13 +160,14 @@ def train(args):
                 save_comparison(spnn_decoded, vae_decoded, images, epoch, batch_idx, args.sample_dir)
 
         avg_loss = epoch_loss / len(loader)
+        wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
         print(f"  Epoch {epoch} — avg decoder loss: {avg_loss:.6f}")
 
         # ── Penrose + roundtrip checks (diagnostic only) ──
         if epoch % args.save_every == 0:
             p_metrics = penrose_check(spnn, images, vae_latent, DEVICE)
             print_penrose_metrics(p_metrics)
-            # TODO: wandb.log(p_metrics, step=epoch) when wandb is integrated
+            wandb.log({**p_metrics, "epoch": epoch})
             spnn.train()
 
             ckpt_path = os.path.join(args.output_dir, f"spnn_epoch{epoch:03d}.pt")
@@ -174,6 +185,8 @@ def train(args):
     print(f"\nTraining complete. Final model: {final_path}")
     print(f"The encoder (spnn.encode / forward) now works automatically —")
     print(f"it uses the same s, t, mix that were trained through the decoder.")
+
+    wandb.finish()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from PIL import Image
 import math
 import sys
 from diffusers import AutoencoderKL
+import wandb
 from models import SPNNAutoencoder
 from diagnostics import penrose_check, print_penrose_metrics
 
@@ -92,11 +93,17 @@ def spnn_cycle_exact(spnn, x):
 def main():
     image_path = IMAGE_PATH
     checkpoint = CHECKPOINT
+    wandb_entity = "yamitehrlich-technion-israel-institute-of-technology"
+    wandb_project = "spnn-vae"
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == "--image" and i < len(sys.argv) - 1:
             image_path = sys.argv[i + 1]
         if arg == "--checkpoint" and i < len(sys.argv) - 1:
             checkpoint = sys.argv[i + 1]
+        if arg == "--wandb_entity" and i < len(sys.argv) - 1:
+            wandb_entity = sys.argv[i + 1]
+        if arg == "--wandb_project" and i < len(sys.argv) - 1:
+            wandb_project = sys.argv[i + 1]
 
     print(f"Image:      {image_path}")
     print(f"Checkpoint: {checkpoint}")
@@ -107,12 +114,18 @@ def main():
     vae = load_sd_vae()
     spnn = load_spnn(checkpoint)
 
+    wandb.init(
+        project=wandb_project, entity=wandb_entity, job_type="test",
+        config={"image": image_path, "checkpoint": checkpoint, "num_cycles": NUM_CYCLES},
+    )
+
     # ── Penrose pseudo-inverse checks ──
     with torch.no_grad():
         spnn_latent = spnn.encode(original)
     print("Penrose pseudo-inverse diagnostics:")
     p_metrics = penrose_check(spnn, original, spnn_latent, DEVICE)
     print_penrose_metrics(p_metrics)
+    wandb.log({"test/" + k: v for k, v in p_metrics.items()})
     print()
 
     vae_x = original.clone()
@@ -134,9 +147,22 @@ def main():
         vae_imgs.append(vae_x.clone())
         spnn_imgs.append(spnn_x.clone())
 
+        vae_mse = calc_mse(vae_x, original)
+        vae_psnr = calc_psnr(vae_x, original)
+        spnn_mse = calc_mse(spnn_x, original)
+        spnn_psnr = calc_psnr(spnn_x, original)
+
+        wandb.log({
+            "test/cycle": i,
+            "test/vae_mse": vae_mse,
+            "test/vae_psnr": vae_psnr,
+            "test/spnn_mse": spnn_mse,
+            "test/spnn_psnr": spnn_psnr,
+        })
+
         print(f"{i:<7} "
-              f"{calc_mse(vae_x, original):<13.6f} {calc_psnr(vae_x, original):<13.2f} "
-              f"{calc_mse(spnn_x, original):<14.2e} {calc_psnr(spnn_x, original):<13.2f}")
+              f"{vae_mse:<13.6f} {vae_psnr:<13.2f} "
+              f"{spnn_mse:<14.2e} {spnn_psnr:<13.2f}")
 
     # ── Save full grid ──
     # Row 1: VAE   (original + cycles 1..10)
@@ -158,6 +184,8 @@ def main():
     ], dim=0)
     save_image(summary, "comparison_summary2.png", nrow=3, padding=4, pad_value=1.0)
     print("Saved: comparison_summary2.png (original | VAE@10 | SPNN@10)")
+
+    wandb.finish()
 
 
 if __name__ == "__main__":
