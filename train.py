@@ -1,3 +1,4 @@
+import argparse
 import os
 import torch
 import torch.nn as nn
@@ -10,22 +11,24 @@ from diffusers import AutoencoderKL
 from models import SPNNAutoencoder
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-IMG_SIZE = 256
-BATCH_SIZE = 4
-NUM_EPOCHS = 1
-LR = 1e-4
-SAVE_EVERY = 5
-NUM_WORKERS = 2
-MAX_IMAGES = None
-OUTPUT_DIR = "checkpoints"
-SAMPLE_DIR = "samples"
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(SAMPLE_DIR, exist_ok=True)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train SPNN VAE decoder via distillation")
+    parser.add_argument("--img_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--save_every", type=int, default=5)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--max_images", type=int, default=None)
+    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--sample_dir", type=str, default="samples")
+    return parser.parse_args()
 
 
 class CelebAHQDataset(Dataset):
-    def __init__(self, max_images=None):
+    def __init__(self, img_size=256, max_images=None):
         from datasets import load_dataset
         print("Loading Ryan-sjtu/celebahq-caption dataset...")
         ds = load_dataset("Ryan-sjtu/celebahq-caption", split="train")
@@ -33,7 +36,7 @@ class CelebAHQDataset(Dataset):
             ds = ds.select(range(min(max_images, len(ds))))
         self.ds = ds
         self.transform = transforms.Compose([
-            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
             transforms.Normalize([0.5]*3, [0.5]*3),
         ])
@@ -73,23 +76,26 @@ def get_vae_pairs(vae, images):
     decoded = vae.decode(latent).sample
     return scaled_latent, decoded
 
-def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx):
+def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sample_dir):
     from torchvision.utils import save_image
     n = min(4, original.size(0))
     orig = (original[:n].cpu() + 1) / 2
     vae_r = (vae_decoded[:n].cpu() + 1) / 2
     spnn_r = (spnn_decoded[:n].detach().cpu() + 1) / 2
     grid = torch.cat([orig, vae_r, spnn_r], dim=0)
-    path = os.path.join(SAMPLE_DIR, f"epoch{epoch:03d}_batch{batch_idx:04d}.png")
+    path = os.path.join(sample_dir, f"epoch{epoch:03d}_batch{batch_idx:04d}.png")
     save_image(grid, path, nrow=n, padding=2)
 
-def train():
+def train(args):
     print(f"Device: {DEVICE}")
 
-    dataset = CelebAHQDataset(max_images=MAX_IMAGES)
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.sample_dir, exist_ok=True)
+
+    dataset = CelebAHQDataset(img_size=args.img_size, max_images=args.max_images)
     loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=True, drop_last=True
+        dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True, drop_last=True
     )
     print(f"Dataset: {len(dataset)} images, {len(loader)} batches/epoch")
 
@@ -101,17 +107,17 @@ def train():
     print(f"SPNN total params: {total_params:,}")
 
     # ── Optimizer: trains ALL of s, t, r, mix through the decoder path ──
-    optimizer = torch.optim.AdamW(spnn.parameters(), lr=LR, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS * len(loader), eta_min=1e-6
+        optimizer, T_max=args.num_epochs * len(loader), eta_min=1e-6
     )
     mse_loss = nn.MSELoss()
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    for epoch in range(1, args.num_epochs + 1):
         spnn.train()
         epoch_loss = 0.0
 
-        pbar = tqdm(loader, desc=f"Epoch {epoch}/{NUM_EPOCHS}")
+        pbar = tqdm(loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for batch_idx, images in enumerate(pbar):
             images = images.to(DEVICE)
 
@@ -140,13 +146,13 @@ def train():
             })
 
             if batch_idx % 200 == 0:
-                save_comparison(spnn_decoded, vae_decoded, images, epoch, batch_idx)
+                save_comparison(spnn_decoded, vae_decoded, images, epoch, batch_idx, args.sample_dir)
 
         avg_loss = epoch_loss / len(loader)
         print(f"  Epoch {epoch} — avg decoder loss: {avg_loss:.6f}")
 
         # ── Sanity check: run full encode->decode and measure roundtrip ──
-        if epoch % SAVE_EVERY == 0:
+        if epoch % args.save_every == 0:
             spnn.eval()
             with torch.no_grad():
                 sample = images[:2]
@@ -162,7 +168,7 @@ def train():
                 print(f"  Roundtrip error (r only):          {roundtrip_r_err:.6f}")
             spnn.train()
 
-            ckpt_path = os.path.join(OUTPUT_DIR, f"spnn_epoch{epoch:03d}.pt")
+            ckpt_path = os.path.join(args.output_dir, f"spnn_epoch{epoch:03d}.pt")
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": spnn.state_dict(),
@@ -172,8 +178,13 @@ def train():
             print(f"  Saved checkpoint: {ckpt_path}")
 
     # ── Final save ──
-    final_path = os.path.join(OUTPUT_DIR, "spnn_final.pt")
+    final_path = os.path.join(args.output_dir, "spnn_final.pt")
     torch.save(spnn.state_dict(), final_path)
     print(f"\nTraining complete. Final model: {final_path}")
     print(f"The encoder (spnn.encode / forward) now works automatically —")
     print(f"it uses the same s, t, mix that were trained through the decoder.")
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    train(args)
