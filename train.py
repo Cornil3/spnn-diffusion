@@ -1,4 +1,3 @@
-import argparse
 import os
 import torch
 import torch.nn as nn
@@ -14,21 +13,6 @@ from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train SPNN VAE decoder via distillation")
-    parser.add_argument("--img_size", type=int, default=256)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--save_every", type=int, default=5)
-    parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--max_images", type=int, default=None)
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--sample_dir", type=str, default="samples")
-    parser.add_argument("--wandb_project", type=str, default="spnn-vae")
-    parser.add_argument("--wandb_entity", type=str, default="yamitehrlich-technion-israel-institute-of-technology")
-    return parser.parse_args()
 
 
 class CelebAHQDataset(Dataset):
@@ -187,8 +171,3 @@ def train(args):
     print(f"it uses the same s, t, mix that were trained through the decoder.")
 
     wandb.finish()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    train(args)

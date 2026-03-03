@@ -4,25 +4,20 @@ from torchvision import transforms
 from torchvision.utils import save_image
 from PIL import Image
 import math
-import sys
 from diffusers import AutoencoderKL
 import wandb
 from models import SPNNAutoencoder
 from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-IMG_SIZE = 256
-NUM_CYCLES = 10
-IMAGE_PATH = "test2.jpg"
-CHECKPOINT = "checkpoints/spnn_final.pt"
 
 
 # ──────────────────────── Helpers ────────────────────────
 
-def load_image(path):
+def load_image(path, img_size):
     img = Image.open(path).convert("RGB")
     t = transforms.Compose([
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3),
     ])
@@ -90,33 +85,20 @@ def spnn_cycle_exact(spnn, x):
 
 # ──────────────────────── Main ────────────────────────
 
-def main():
-    image_path = IMAGE_PATH
-    checkpoint = CHECKPOINT
-    wandb_entity = "yamitehrlich-technion-israel-institute-of-technology"
-    wandb_project = "spnn-vae"
-    for i, arg in enumerate(sys.argv[1:], 1):
-        if arg == "--image" and i < len(sys.argv) - 1:
-            image_path = sys.argv[i + 1]
-        if arg == "--checkpoint" and i < len(sys.argv) - 1:
-            checkpoint = sys.argv[i + 1]
-        if arg == "--wandb_entity" and i < len(sys.argv) - 1:
-            wandb_entity = sys.argv[i + 1]
-        if arg == "--wandb_project" and i < len(sys.argv) - 1:
-            wandb_project = sys.argv[i + 1]
 
-    print(f"Image:      {image_path}")
-    print(f"Checkpoint: {checkpoint}")
+def run_test(args):
+    print(f"Image:      {args.image}")
+    print(f"Checkpoint: {args.checkpoint}")
     print(f"Device:     {DEVICE}")
-    print(f"Cycles:     {NUM_CYCLES}\n")
+    print(f"Cycles:     {args.num_cycles}\n")
 
-    original = load_image(image_path)
+    original = load_image(args.image, args.img_size)
     vae = load_sd_vae()
-    spnn = load_spnn(checkpoint)
+    spnn = load_spnn(args.checkpoint)
 
     wandb.init(
-        project=wandb_project, entity=wandb_entity, job_type="test",
-        config={"image": image_path, "checkpoint": checkpoint, "num_cycles": NUM_CYCLES},
+        project=args.wandb_project, entity=args.wandb_entity, job_type="test",
+        config=vars(args),
     )
 
     # ── Penrose pseudo-inverse checks ──
@@ -140,7 +122,7 @@ def main():
     print(header)
     print("-" * len(header))
 
-    for i in range(1, NUM_CYCLES + 1):
+    for i in range(1, args.num_cycles + 1):
         vae_x = vae_cycle(vae, vae_x)
         spnn_x = spnn_cycle_exact(spnn, spnn_x)
 
@@ -171,10 +153,10 @@ def main():
     row_spnn = torch.cat([to_display(img) for img in spnn_imgs], dim=0)
     grid = torch.cat([row_vae, row_spnn], dim=0)
 
-    save_image(grid, "comparison2.png", nrow=NUM_CYCLES + 1, padding=4, pad_value=1.0)
+    save_image(grid, "comparison2.png", nrow=args.num_cycles + 1, padding=4, pad_value=1.0)
     print(f"\nSaved: comparison2.png")
-    print("  Row 1: VAE   (original -> cycle 1..10)")
-    print("  Row 2: SPNN  (original -> cycle 1..10)")
+    print(f"  Row 1: VAE   (original -> cycle 1..{args.num_cycles})")
+    print(f"  Row 2: SPNN  (original -> cycle 1..{args.num_cycles})")
 
     # ── Save compact summary ──
     summary = torch.cat([
@@ -183,10 +165,6 @@ def main():
         to_display(spnn_imgs[-1]),
     ], dim=0)
     save_image(summary, "comparison_summary2.png", nrow=3, padding=4, pad_value=1.0)
-    print("Saved: comparison_summary2.png (original | VAE@10 | SPNN@10)")
+    print(f"Saved: comparison_summary2.png (original | VAE@{args.num_cycles} | SPNN@{args.num_cycles})")
 
     wandb.finish()
-
-
-if __name__ == "__main__":
-    main()
