@@ -137,7 +137,7 @@ def main():
     grid = torch.cat([row_vae, row_spnn], dim=0)
 
     save_image(grid, "comparison2.png", nrow=NUM_CYCLES + 1, padding=4, pad_value=1.0)
-    print(f"\nSaved: comparison.png")
+    print(f"\nSaved: comparison2.png")
     print("  Row 1: VAE   (original -> cycle 1..10)")
     print("  Row 2: SPNN  (original -> cycle 1..10)")
 
@@ -148,7 +148,7 @@ def main():
         to_display(spnn_imgs[-1]),
     ], dim=0)
     save_image(summary, "comparison_summary2.png", nrow=3, padding=4, pad_value=1.0)
-    print("Saved: comparison_summary.png (original | VAE@10 | SPNN@10)")
+    print("Saved: comparison_summary2.png (original | VAE@10 | SPNN@10)")
 
 
 if __name__ == "__main__":
