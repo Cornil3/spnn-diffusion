@@ -1,0 +1,6 @@
+torch>=2.0.0
+torchvision>=0.15.0
+Pillow>=9.0.0
+tqdm>=4.60.0
+diffusers>=0.20.0
+datasets>=2.0.0
