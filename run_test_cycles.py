@@ -7,6 +7,7 @@ import math
 import sys
 from diffusers import AutoencoderKL
 from models import SPNNAutoencoder
+from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMG_SIZE = 256
@@ -105,6 +106,14 @@ def main():
     original = load_image(image_path)
     vae = load_sd_vae()
     spnn = load_spnn(checkpoint)
+
+    # ── Penrose pseudo-inverse checks ──
+    with torch.no_grad():
+        spnn_latent = spnn.encode(original)
+    print("Penrose pseudo-inverse diagnostics:")
+    p_metrics = penrose_check(spnn, original, spnn_latent, DEVICE)
+    print_penrose_metrics(p_metrics)
+    print()
 
     vae_x = original.clone()
     spnn_x = original.clone()

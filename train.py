@@ -9,6 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 from diffusers import AutoencoderKL
 from models import SPNNAutoencoder
+from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -151,21 +152,11 @@ def train(args):
         avg_loss = epoch_loss / len(loader)
         print(f"  Epoch {epoch} — avg decoder loss: {avg_loss:.6f}")
 
-        # ── Sanity check: run full encode->decode and measure roundtrip ──
+        # ── Penrose + roundtrip checks (diagnostic only) ──
         if epoch % args.save_every == 0:
-            spnn.eval()
-            with torch.no_grad():
-                sample = images[:2]
-                # Encode with SPNN forward (uses the SAME s, t, mix we just trained)
-                latent, side = spnn.encode(sample, return_latents=True)
-                # Decode with side-info (should be near-perfect inversion)
-                roundtrip = spnn.decode(latent, latents=side)
-                roundtrip_err = F.mse_loss(roundtrip, sample).item()
-                # Decode without side-info (uses r networks)
-                roundtrip_r = spnn.decode(latent)
-                roundtrip_r_err = F.mse_loss(roundtrip_r, sample).item()
-                print(f"  Roundtrip error (with side-info):  {roundtrip_err:.2e}")
-                print(f"  Roundtrip error (r only):          {roundtrip_r_err:.6f}")
+            p_metrics = penrose_check(spnn, images, vae_latent, DEVICE)
+            print_penrose_metrics(p_metrics)
+            # TODO: wandb.log(p_metrics, step=epoch) when wandb is integrated
             spnn.train()
 
             ckpt_path = os.path.join(args.output_dir, f"spnn_epoch{epoch:03d}.pt")
