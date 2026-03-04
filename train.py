@@ -1,10 +1,12 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from diffusers import AutoencoderKL
 import wandb
+import lpips
 from models import SPNNAutoencoder
 from dataset import CelebAHQDataset
 from diagnostics import penrose_check, print_penrose_metrics
@@ -50,15 +52,13 @@ def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sampl
 def train(args):
     print(f"Device: {DEVICE}")
 
-    wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args))
-
     os.makedirs(args.output_dir, exist_ok=True)
     train_sample_dir = os.path.join(args.sample_dir, "train")
     os.makedirs(train_sample_dir, exist_ok=True)
 
     dataset = CelebAHQDataset(
         img_size=args.img_size, max_images=args.max_images,
-        split="train", test_ratio=args.test_ratio,
+        split="train", n_test=args.n_test,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True,
@@ -73,9 +73,18 @@ def train(args):
     total_params = sum(p.numel() for p in spnn.parameters())
     print(f"SPNN total params: {total_params:,}")
 
+    # ── LPIPS perceptual loss (frozen) ──
+    lpips_fn = None
+    if args.lambda_lpips > 0:
+        lpips_fn = lpips.LPIPS(net="vgg").to(DEVICE)
+        lpips_fn.eval()
+        for p in lpips_fn.parameters():
+            p.requires_grad = False
+        print("LPIPS loss enabled (VGG backbone)")
+
     # ── Fixed test batch for Penrose checks ──
     test_dataset = CelebAHQDataset(
-        img_size=args.img_size, split="test", test_ratio=args.test_ratio,
+        img_size=args.img_size, split="test", n_test=args.n_test,
     )
     test_loader = DataLoader(test_dataset, batch_size=args.penrose_batch_size, shuffle=False)
     penrose_images = next(iter(test_loader)).to(DEVICE)
@@ -107,7 +116,14 @@ def train(args):
             # All of s, t, r, mix get gradients here.
             spnn_decoded = spnn.decode(vae_latent)
 
-            loss = mse_loss(spnn_decoded, vae_decoded)
+            decoder_loss = mse_loss(spnn_decoded, vae_decoded)
+
+            # ── LPIPS perceptual loss ──
+            lpips_loss = torch.tensor(0.0, device=DEVICE)
+            if lpips_fn is not None:
+                lpips_loss = lpips_fn(spnn_decoded, vae_decoded).mean()
+
+            loss = decoder_loss + args.lambda_lpips * lpips_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -119,6 +135,8 @@ def train(args):
 
             wandb.log({
                 "train/loss": loss.item(),
+                "train/decoder_loss": decoder_loss.item(),
+                "train/lpips_loss": lpips_loss.item(),
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": grad_norm.item(),
             })
@@ -157,5 +175,3 @@ def train(args):
     print(f"\nTraining complete. Final model: {final_path}")
     print(f"The encoder (spnn.encode / forward) now works automatically —")
     print(f"it uses the same s, t, mix that were trained through the decoder.")
-
-    wandb.finish()

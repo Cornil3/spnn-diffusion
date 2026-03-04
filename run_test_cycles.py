@@ -84,15 +84,10 @@ def run_test(args):
     spnn = load_spnn(args.checkpoint, args.mix_type, args.hidden, args.scale_bound)
 
     dataset = CelebAHQDataset(
-        img_size=args.img_size, split="test", test_ratio=args.test_ratio,
+        img_size=args.img_size, split="test", n_test=args.n_test,
     )
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
     print(f"Test set: {len(dataset)} images\n")
-
-    wandb.init(
-        project=args.wandb_project, entity=args.wandb_entity, job_type="test",
-        config=vars(args),
-    )
 
     test_sample_dir = os.path.join(args.sample_dir, "test")
     os.makedirs(test_sample_dir, exist_ok=True)
@@ -188,5 +183,3 @@ def run_test(args):
 
     print(f"\nAveraged over {len(dataset)} test images.")
     print(f"Saved visual grids to {test_sample_dir}/test_cycles_*.png")
-
-    wandb.finish()
