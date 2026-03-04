@@ -7,11 +7,11 @@ from PIL import Image
 class CelebAHQDataset(Dataset):
     """
     CelebA-HQ dataset with reproducible train/test split.
-    split="train" returns the first (1 - test_ratio) fraction.
-    split="test"  returns the last test_ratio fraction.
+    split="train" returns the first (n - n_test) images.
+    split="test"  returns the last n_test images.
     split="all"   returns everything (original behavior).
     """
-    def __init__(self, img_size=256, max_images=None, split="all", test_ratio=0.1):
+    def __init__(self, img_size=256, max_images=None, split="all", n_test=1000):
         from datasets import load_dataset
         print("Loading Ryan-sjtu/celebahq-caption dataset...")
         ds = load_dataset("Ryan-sjtu/celebahq-caption", split="train")
@@ -20,7 +20,7 @@ class CelebAHQDataset(Dataset):
             ds = ds.select(range(min(max_images, len(ds))))
 
         n = len(ds)
-        n_test = int(n * test_ratio)
+        n_test = min(n_test, n)
         n_train = n - n_test
 
         if split == "train":
@@ -28,7 +28,7 @@ class CelebAHQDataset(Dataset):
         elif split == "test":
             ds = ds.select(range(n_train, n))
 
-        print(f"  Split: {split} — {len(ds)} images (total {n}, test_ratio={test_ratio})")
+        print(f"  Split: {split} — {len(ds)} images (total {n}, n_test={n_test})")
         self.ds = ds
         self.transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
