@@ -129,10 +129,10 @@ class PixelUnshuffleBlock(nn.Module):
         super().__init__()
         self.r = r
 
-    def forward(self, x, return_latent=False):
-        return F.pixel_unshuffle(x, self.r), None
+    def forward(self, x):
+        return F.pixel_unshuffle(x, self.r)
 
-    def pinv(self, y, x1_override=None):
+    def pinv(self, y):
         return F.pixel_shuffle(y, self.r)
 
 
@@ -160,16 +160,24 @@ class ConvPINNBlock(nn.Module):
         else:
             self.mix = Cayley1x1Conv(in_ch)
 
-    def forward(self, x, return_latent=False):
+    def forward(self, x):
         x = self.mix.forward(x)
         x0 = x[:, :self.out_ch]
         x1 = x[:, self.out_ch:]
         y = x0 * self.s(x1) + self.t(x1)
-        z = x1 if return_latent else None
-        return y, z
+        return y
 
-    def pinv(self, y, x1_override=None):
-        x1 = self.r(y) if x1_override is None else x1_override
+    def forward_with_side_channels(self, x):
+        """Like forward but also returns the side-channel x1."""
+        x = self.mix.forward(x)
+        x0 = x[:, :self.out_ch]
+        x1 = x[:, self.out_ch:]
+        y = x0 * self.s(x1) + self.t(x1)
+        return y, x1
+
+    def pinv(self, y):
+        self.last_y = y.detach()  # cache for r supervision
+        x1 = self.r(y)
         x0 = (y - self.t(x1)) * self.s(x1, neg=True)
         x = torch.cat([x0, x1], dim=1)
         return self.mix.inverse(x)
@@ -203,32 +211,24 @@ class SPNNAutoencoder(nn.Module):
                           mix_type=mix_type, feat_size=32),
         ])
 
-    def encode(self, x, return_latents=False):
-        """Encode image -> latent. Optionally return side-info for perfect inversion."""
-        latents = []
+    def encode(self, x):
+        """Encode image -> latent."""
         for b in self.blocks:
-            x, z = b(x, return_latent=return_latents)
-            latents.append(z)
-        return (x, latents) if return_latents else x
+            x = b(x)
+        return x
 
-    def decode(self, y, latents=None):
-        """Decode latent -> image using pseudo-inverse."""
-        if latents is not None:
-            z_stack = list(reversed(latents))
-        else:
-            z_stack = [None] * len(self.blocks)
+    def decode(self, y):
+        """Decode latent -> image using pseudo-inverse (r network)."""
         for b in reversed(self.blocks):
-            z = z_stack.pop(0)
-            y = b.pinv(y, x1_override=z)
+            y = b.pinv(y)
         return y
 
-    def forward(self, x, return_latents=False):
+    def forward(self, x):
         """Full encode-decode cycle."""
-        if return_latents:
-            latent, side = self.encode(x, return_latents=True)
-            recon = self.decode(latent, latents=side)
-            return recon, latent, side
-        else:
-            latent = self.encode(x)
-            recon = self.decode(latent)
-            return recon, latent
+        latent = self.encode(x)
+        recon = self.decode(latent)
+        return recon, latent
+
+    def pinn_blocks(self):
+        """Return only ConvPINNBlock instances (skip PixelUnshuffleBlocks)."""
+        return [b for b in self.blocks if isinstance(b, ConvPINNBlock)]
