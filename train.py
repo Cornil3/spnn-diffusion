@@ -1,44 +1,17 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-from PIL import Image
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from diffusers import AutoencoderKL
 import wandb
 from models import SPNNAutoencoder
+from dataset import CelebAHQDataset
 from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-
-class CelebAHQDataset(Dataset):
-    def __init__(self, img_size=256, max_images=None):
-        from datasets import load_dataset
-        print("Loading Ryan-sjtu/celebahq-caption dataset...")
-        ds = load_dataset("Ryan-sjtu/celebahq-caption", split="train")
-        if max_images is not None:
-            ds = ds.select(range(min(max_images, len(ds))))
-        self.ds = ds
-        self.transform = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5]*3, [0.5]*3),
-        ])
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, idx):
-        item = self.ds[idx]
-        img = item["image"]
-        if not isinstance(img, Image.Image):
-            img = Image.open(img)
-        img = img.convert("RGB")
-        return self.transform(img)
 
 
 def load_sd_vae():
@@ -80,9 +53,13 @@ def train(args):
     wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args))
 
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(args.sample_dir, exist_ok=True)
+    train_sample_dir = os.path.join(args.sample_dir, "train")
+    os.makedirs(train_sample_dir, exist_ok=True)
 
-    dataset = CelebAHQDataset(img_size=args.img_size, max_images=args.max_images)
+    dataset = CelebAHQDataset(
+        img_size=args.img_size, max_images=args.max_images,
+        split="train", test_ratio=args.test_ratio,
+    )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True, drop_last=True
@@ -91,10 +68,20 @@ def train(args):
 
     # ── Models ──
     vae = load_sd_vae()
-    spnn = SPNNAutoencoder(mix_type="cayley", hidden=128, scale_bound=2.0).to(DEVICE)
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, scale_bound=args.scale_bound).to(DEVICE)
 
     total_params = sum(p.numel() for p in spnn.parameters())
     print(f"SPNN total params: {total_params:,}")
+
+    # ── Fixed test batch for Penrose checks ──
+    test_dataset = CelebAHQDataset(
+        img_size=args.img_size, split="test", test_ratio=args.test_ratio,
+    )
+    test_loader = DataLoader(test_dataset, batch_size=args.penrose_batch_size, shuffle=False)
+    penrose_images = next(iter(test_loader)).to(DEVICE)
+    penrose_latent, _ = get_vae_pairs(vae, penrose_images)
+    del test_dataset, test_loader
+    print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
 
     # ── Optimizer: trains ALL of s, t, r, mix through the decoder path ──
     optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -124,7 +111,7 @@ def train(args):
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(spnn.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(spnn.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 
@@ -133,6 +120,7 @@ def train(args):
             wandb.log({
                 "train/loss": loss.item(),
                 "train/lr": scheduler.get_last_lr()[0],
+                "train/grad_norm": grad_norm.item(),
             })
 
             pbar.set_postfix({
@@ -140,8 +128,8 @@ def train(args):
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
             })
 
-            if batch_idx % 200 == 0:
-                save_comparison(spnn_decoded, vae_decoded, images, epoch, batch_idx, args.sample_dir)
+            # if batch_idx % 200 == 0:
+            #     save_comparison(spnn_decoded, vae_decoded, images, epoch, batch_idx, train_sample_dir)
 
         avg_loss = epoch_loss / len(loader)
         wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
@@ -149,12 +137,12 @@ def train(args):
 
         # ── Penrose + roundtrip checks (diagnostic only) ──
         if epoch % args.save_every == 0:
-            p_metrics = penrose_check(spnn, images, vae_latent, DEVICE)
+            p_metrics = penrose_check(spnn, penrose_images, penrose_latent, DEVICE)
             print_penrose_metrics(p_metrics)
             wandb.log({**p_metrics, "epoch": epoch})
             spnn.train()
 
-            ckpt_path = os.path.join(args.output_dir, f"spnn_epoch{epoch:03d}.pt")
+            ckpt_path = os.path.join(args.output_dir, f"spnn_vae_epoch{epoch:03d}.pt")
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": spnn.state_dict(),
@@ -164,7 +152,7 @@ def train(args):
             print(f"  Saved checkpoint: {ckpt_path}")
 
     # ── Final save ──
-    final_path = os.path.join(args.output_dir, "spnn_final.pt")
+    final_path = os.path.join(args.output_dir, "spnn_vae_final.pt")
     torch.save(spnn.state_dict(), final_path)
     print(f"\nTraining complete. Final model: {final_path}")
     print(f"The encoder (spnn.encode / forward) now works automatically —")
