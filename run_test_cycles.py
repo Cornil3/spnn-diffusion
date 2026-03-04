@@ -62,15 +62,14 @@ def vae_cycle(vae, x):
 
 
 @torch.no_grad()
-def spnn_cycle_exact(spnn, x):
+def spnn_cycle(spnn, x):
     """
-    SPNN encode -> decode WITH side-channel latents.
-    encode() uses the same s, t, mix that were trained in the decoder.
-    decode() receives the x1 side-channels from encode, so it reuses
-    the exact s(x1) and t(x1) — mathematically exact inversion.
+    SPNN encode -> decode via pseudo-inverse (r network).
+    No side-channel latents — decode() uses the r network to estimate x1.
+    This is the realistic path for DDNM / diffusion pipelines.
     """
-    latent, side = spnn.encode(x, return_latents=True)
-    return spnn.decode(latent, latents=side)
+    latent = spnn.encode(x)
+    return spnn.decode(latent)
 
 
 # ──────────────────────── Main ────────────────────────
@@ -99,7 +98,6 @@ def run_test(args):
     os.makedirs(test_sample_dir, exist_ok=True)
 
     # ── Aggregate metrics per cycle ──
-    # cycle_idx -> list of (vae_mse, vae_psnr, spnn_mse, spnn_psnr)
     cycle_metrics = {c: [] for c in range(1, args.num_cycles + 1)}
     all_penrose = []
 
@@ -112,7 +110,7 @@ def run_test(args):
         p_metrics = penrose_check(spnn, original, spnn_latent, DEVICE)
         all_penrose.append(p_metrics)
 
-        # ── Cycle test ──
+        # ── Cycle test: VAE vs SPNN (pseudo-inverse) ──
         vae_x = original.clone()
         spnn_x = original.clone()
 
@@ -121,7 +119,7 @@ def run_test(args):
 
         for c in range(1, args.num_cycles + 1):
             vae_x = vae_cycle(vae, vae_x)
-            spnn_x = spnn_cycle_exact(spnn, spnn_x)
+            spnn_x = spnn_cycle(spnn, spnn_x)
 
             vae_imgs.append(vae_x.clone())
             spnn_imgs.append(spnn_x.clone())
@@ -140,7 +138,7 @@ def run_test(args):
             grid = torch.cat([row_vae, row_spnn], dim=0)
             grid_path = os.path.join(test_sample_dir, f"test_cycles_{img_idx:03d}.png")
             save_image(grid, grid_path, nrow=args.num_cycles + 1, padding=4, pad_value=1.0)
-            wandb.log({"test/cycle_grids": wandb.Image(grid_path, caption=f"Image {img_idx} — Row1: VAE, Row2: SPNN")})
+            wandb.log({"test/cycle_grids": wandb.Image(grid_path, caption=f"Image {img_idx} — Row1: VAE, Row2: SPNN (pinv)")})
 
             # ── Summary: original | VAE@last | SPNN@last ──
             summary = torch.cat([
@@ -150,7 +148,7 @@ def run_test(args):
             ], dim=0)
             summary_path = os.path.join(test_sample_dir, f"test_summary_{img_idx:03d}.png")
             save_image(summary, summary_path, nrow=3, padding=4, pad_value=1.0)
-            wandb.log({"test/summaries": wandb.Image(summary_path, caption=f"Image {img_idx} — Original | VAE@{args.num_cycles} | SPNN@{args.num_cycles}")})
+            wandb.log({"test/summaries": wandb.Image(summary_path, caption=f"Image {img_idx} — Orig | VAE@{args.num_cycles} | SPNN@{args.num_cycles}")})
 
     # ── Average Penrose metrics ──
     avg_penrose = {}
