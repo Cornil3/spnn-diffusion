@@ -13,8 +13,10 @@
 set -euo pipefail
 
 mkdir -p logs
-cd /home/yamitehrlich/work/PINN/spnn_vae
+cd /home/yamitehrlich/work/spnn-diffusion
 
-PY=/home/yamitehrlich/work/PINN/.venv_new/bin/python
+source venv/bin/activate
 
-$PY -u main.py --train --test --output_dir checkpoints_bigarch_more_losses
+python -u main.py --train --test \
+    --dataset celebahq \
+    --output_dir checkpoints_celebahq
