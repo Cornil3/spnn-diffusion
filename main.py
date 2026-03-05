@@ -31,16 +31,18 @@ def parse_args():
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--scale_bound", type=float, default=2.0)
 
-    parser.add_argument("--r_loss_weight", type=float, default=0.01,
-                        help="Weight of direct r supervision loss")
-    parser.add_argument("--lambda_lpips", type=float, default=0.1,
+    parser.add_argument("--lambda_lpips", type=float, default=0.5,
                         help="Weight of LPIPS perceptual loss (0 to disable)")
+    parser.add_argument("--lambda_cycle", type=float, default=0.3,
+                        help="Weight of cycle/surjectivity loss (0 to disable)")
+    parser.add_argument("--lambda_roundtrip", type=float, default=0.3,
+                        help="Weight of roundtrip/pseudo-inverse stability loss (0 to disable)")
 
     # ── Train args ──
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--save_every", type=int, default=5)
+    parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--penrose_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
@@ -56,13 +58,14 @@ def parse_args():
     args = parser.parse_args()
 
     if args.checkpoint is None:
-        args.checkpoint = os.path.join(args.output_dir, "spnn_vae_epoch015.pt")
+        args.checkpoint = os.path.join(args.output_dir, "spnn_vae_final.pt")
 
     # ── Dynamic wandb run name ──
     mode = "+".join(filter(None, ["train" if args.train else None, "test" if args.test else None]))
     args.wandb_run_name = (
         f"{mode}_ep{args.num_epochs}_bs{args.batch_size}_lr{args.lr:.0e}"
-        f"_sb{args.scale_bound}_rw{args.r_loss_weight}_lpips{args.lambda_lpips}"
+        f"_sb{args.scale_bound}_lpips{args.lambda_lpips}"
+        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}"
         f"_h{args.hidden}_{os.path.basename(args.output_dir)}"
     )
 
