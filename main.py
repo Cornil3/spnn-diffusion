@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping (0 to disable)")
     parser.add_argument("--save_every", type=int, default=1)
     parser.add_argument("--penrose_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=16)

@@ -151,7 +151,10 @@ def train(args):
 
             optimizer.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(spnn.parameters(), max_norm=1.0)
+            if args.max_grad_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(spnn.parameters(), max_norm=args.max_grad_norm)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(spnn.parameters(), max_norm=float('inf'))
             optimizer.step()
             scheduler.step()
 
