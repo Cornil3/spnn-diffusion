@@ -12,6 +12,13 @@ def parse_args():
     parser.add_argument("--train", action="store_true", help="Run training")
     parser.add_argument("--test", action="store_true", help="Run cycle consistency test")
 
+    # ── Dataset ──
+    parser.add_argument("--dataset", type=str, default="celebahq",
+                        choices=["celebahq", "laion"],
+                        help="Dataset to use for training")
+    parser.add_argument("--laion_dir", type=str, default=None,
+                        help="Path to LAION img2dataset output dir (required if --dataset=laion)")
+
     # ── Shared ──
     parser.add_argument("--img_size", type=int, default=256)
     parser.add_argument("--n_test", type=int, default=1000,

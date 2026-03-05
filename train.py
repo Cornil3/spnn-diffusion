@@ -8,7 +8,7 @@ from diffusers import AutoencoderKL
 import wandb
 import lpips
 from models import SPNNAutoencoder
-from dataset import CelebAHQDataset
+from dataset import CelebAHQDataset, LAIONAestheticDataset
 from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,10 +56,16 @@ def train(args):
     train_sample_dir = os.path.join(args.sample_dir, "train")
     os.makedirs(train_sample_dir, exist_ok=True)
 
-    dataset = CelebAHQDataset(
-        img_size=args.img_size, max_images=args.max_images,
-        split="train", n_test=args.n_test,
-    )
+    if args.dataset == "laion":
+        dataset = LAIONAestheticDataset(
+            data_dir=args.laion_dir, img_size=args.img_size,
+            split="train", n_test=args.n_test, max_images=args.max_images,
+        )
+    else:
+        dataset = CelebAHQDataset(
+            img_size=args.img_size, max_images=args.max_images,
+            split="train", n_test=args.n_test,
+        )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True, drop_last=True
@@ -83,9 +89,15 @@ def train(args):
         print("LPIPS loss enabled (VGG backbone)")
 
     # ── Fixed test batch for Penrose checks ──
-    test_dataset = CelebAHQDataset(
-        img_size=args.img_size, split="test", n_test=args.n_test,
-    )
+    if args.dataset == "laion":
+        test_dataset = LAIONAestheticDataset(
+            data_dir=args.laion_dir, img_size=args.img_size,
+            split="test", n_test=args.n_test,
+        )
+    else:
+        test_dataset = CelebAHQDataset(
+            img_size=args.img_size, split="test", n_test=args.n_test,
+        )
     test_loader = DataLoader(test_dataset, batch_size=args.penrose_batch_size, shuffle=False)
     penrose_images = next(iter(test_loader)).to(DEVICE)
     penrose_latent, _ = get_vae_pairs(vae, penrose_images)
@@ -110,12 +122,8 @@ def train(args):
             # ── Get VAE targets: latent -> decoded image ──
             vae_latent, vae_decoded = get_vae_pairs(vae, images)
 
-            # ── Train SPNN decoder: feed VAE latent, match VAE output ──
-            # This is the pinv path: it uses r to estimate side-channels,
-            # then s and t to invert the affine coupling, then mix.inverse.
-            # All of s, t, r, mix get gradients here.
+            # ── Decoder loss: feed VAE latent, match VAE output ──
             spnn_decoded = spnn.decode(vae_latent)
-
             decoder_loss = mse_loss(spnn_decoded, vae_decoded)
 
             # ── LPIPS perceptual loss ──
@@ -123,7 +131,23 @@ def train(args):
             if lpips_fn is not None:
                 lpips_loss = lpips_fn(spnn_decoded, vae_decoded).mean()
 
-            loss = decoder_loss + args.lambda_lpips * lpips_loss
+            # ── Cycle loss (surjectivity): encode(decode(z)) ≈ z ──
+            cycle_loss = torch.tensor(0.0, device=DEVICE)
+            if args.lambda_cycle > 0:
+                re_encoded = spnn.encode(spnn_decoded)
+                cycle_loss = mse_loss(re_encoded, vae_latent)
+
+            # ── Roundtrip loss (pseudo-inverse stability): decode(encode(x)) ≈ x ──
+            roundtrip_loss = torch.tensor(0.0, device=DEVICE)
+            if args.lambda_roundtrip > 0:
+                spnn_latent = spnn.encode(images)
+                spnn_recon = spnn.decode(spnn_latent)
+                roundtrip_loss = mse_loss(spnn_recon, images)
+
+            loss = (decoder_loss
+                    + args.lambda_lpips * lpips_loss
+                    + args.lambda_cycle * cycle_loss
+                    + args.lambda_roundtrip * roundtrip_loss)
 
             optimizer.zero_grad()
             loss.backward()
@@ -137,6 +161,8 @@ def train(args):
                 "train/loss": loss.item(),
                 "train/decoder_loss": decoder_loss.item(),
                 "train/lpips_loss": lpips_loss.item(),
+                "train/cycle_loss": cycle_loss.item(),
+                "train/roundtrip_loss": roundtrip_loss.item(),
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": grad_norm.item(),
             })

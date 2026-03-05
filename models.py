@@ -61,6 +61,44 @@ class Householder1x1Conv(BaseOrthogonal1x1Conv):
         return W
 
 
+class ResBlock(nn.Module):
+    """Conv3x3 → GroupNorm → ReLU → Conv3x3 → GroupNorm + skip → ReLU"""
+    def __init__(self, channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.GroupNorm(min(32, channels), channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.GroupNorm(min(32, channels), channels),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.block(x) + x)
+
+
+class SelfAttention(nn.Module):
+    """Channel-wise self-attention: norm → qkv → attention → out + skip"""
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = nn.GroupNorm(min(32, channels), channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, 1)
+        self.out = nn.Conv2d(channels, channels, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        h = self.norm(x)
+        qkv = self.qkv(h).reshape(B, 3, C, H * W)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # each [B, C, HW]
+        attn = torch.bmm(q.transpose(1, 2), k) * (C ** -0.5)  # [B, HW, HW]
+        attn = attn.softmax(dim=-1)
+        out = torch.bmm(v, attn.transpose(1, 2)).reshape(B, C, H, W)  # [B, C, H, W]
+        return x + self.out(out)
+
+
 class ConvMLP(nn.Module):
     """
     Generic convolutional MLP used for s, t, r sub-networks.
@@ -85,18 +123,41 @@ class ConvMLP(nn.Module):
             nn.init.zeros_(self.net[-1].weight)
             nn.init.zeros_(self.net[-1].bias)
         elif feat_size is not None and feat_size >= 4:
-            h1 = min(max(hidden_ch, in_ch), 512)
-            h2 = min(h1 * 2, 1024)
-            self.net = nn.Sequential(
-                nn.Conv2d(in_ch, h1, 3, padding=1), nn.ReLU(),
-                nn.Conv2d(h1, h1, 3, padding=1), nn.ReLU(),
-                nn.Conv2d(h1, h2, 3, stride=2, padding=1), nn.ReLU(),
-                nn.Conv2d(h2, h2, 3, padding=1), nn.ReLU(),
-                nn.ConvTranspose2d(h2, h1, 4, stride=2, padding=1), nn.ReLU(),
-                nn.Conv2d(h1, out_ch, 3, padding=1),
+            self._use_residual = True
+            h1 = hidden_ch
+            h2 = hidden_ch * 2
+            # Encoder: project in + 3 residual blocks
+            self.enc_in = nn.Sequential(
+                nn.Conv2d(in_ch, h1, 3, padding=1),
+                nn.GroupNorm(min(32, h1), h1),
+                nn.ReLU(inplace=True),
             )
-            nn.init.zeros_(self.net[-1].weight)
-            nn.init.zeros_(self.net[-1].bias)
+            self.enc_blocks = nn.Sequential(
+                ResBlock(h1), ResBlock(h1), ResBlock(h1),
+            )
+            # Down
+            self.down = nn.Sequential(
+                nn.Conv2d(h1, h2, 3, stride=2, padding=1),
+                nn.GroupNorm(min(32, h2), h2),
+                nn.ReLU(inplace=True),
+            )
+            # Bottleneck: 2 residual blocks + self-attention
+            self.bottleneck = nn.Sequential(
+                ResBlock(h2), ResBlock(h2),
+                SelfAttention(h2),
+            )
+            # Up
+            self.up = nn.Sequential(
+                nn.ConvTranspose2d(h2, h1, 4, stride=2, padding=1),
+                nn.GroupNorm(min(32, h1), h1),
+            )
+            # Decoder: 3 residual blocks + output
+            self.dec_blocks = nn.Sequential(
+                ResBlock(h1), ResBlock(h1), ResBlock(h1),
+            )
+            self.out = nn.Conv2d(h1, out_ch, 3, padding=1)
+            nn.init.zeros_(self.out.weight)
+            nn.init.zeros_(self.out.bias)
         else:
             h = min(max(hidden_ch, in_ch), 512)
             self.net = nn.Sequential(
@@ -109,7 +170,17 @@ class ConvMLP(nn.Module):
 
     def forward(self, x, neg=False):
         if self.in_ch > 0:
-            x = self.net(x)
+            if getattr(self, '_use_residual', False):
+                h = self.enc_in(x)                       # [B, h1, H, W]
+                h = self.enc_blocks(h)                   # 3 residual blocks
+                skip = h                                 # save for skip connection
+                h = self.down(h)                         # [B, h2, H/2, W/2]
+                h = self.bottleneck(h)                   # 2 res blocks + self-attn
+                h = F.relu(self.up(h) + skip)            # skip connection
+                h = self.dec_blocks(h)                   # 3 residual blocks
+                x = self.out(h)
+            else:
+                x = self.net(x)
         else:
             B, _, H, W = x.shape
             x = self.net.expand(B, self.out_ch, H, W)
@@ -141,7 +212,7 @@ class ConvPINNBlock(nn.Module):
     Coupling block: splits channels, applies affine transform via s,t,
     reconstructs via r (pseudo-inverse path).
     """
-    def __init__(self, in_ch, out_ch, hidden=128, scale_bound=2.0,
+    def __init__(self, in_ch, out_ch, hidden=128, r_hidden=None, scale_bound=2.0,
                  mix_type="cayley", feat_size=None):
         super().__init__()
         assert in_ch > out_ch, (
@@ -149,11 +220,13 @@ class ConvPINNBlock(nn.Module):
         )
         self.in_ch = in_ch
         self.out_ch = out_ch
+        if r_hidden is None:
+            r_hidden = hidden * 2
 
         side_ch = in_ch - out_ch
         self.t = ConvMLP(side_ch, out_ch, None, hidden, feat_size=feat_size)
         self.s = ConvMLP(side_ch, out_ch, scale_bound, hidden, feat_size=feat_size)
-        self.r = ConvMLP(out_ch, side_ch, None, hidden, feat_size=feat_size)
+        self.r = ConvMLP(out_ch, side_ch, None, r_hidden, feat_size=feat_size)
 
         if mix_type == "householder":
             self.mix = Householder1x1Conv(in_ch)
@@ -167,16 +240,7 @@ class ConvPINNBlock(nn.Module):
         y = x0 * self.s(x1) + self.t(x1)
         return y
 
-    def forward_with_side_channels(self, x):
-        """Like forward but also returns the side-channel x1."""
-        x = self.mix.forward(x)
-        x0 = x[:, :self.out_ch]
-        x1 = x[:, self.out_ch:]
-        y = x0 * self.s(x1) + self.t(x1)
-        return y, x1
-
     def pinv(self, y):
-        self.last_y = y.detach()  # cache for r supervision
         x1 = self.r(y)
         x0 = (y - self.t(x1)) * self.s(x1, neg=True)
         x = torch.cat([x0, x1], dim=1)
@@ -185,29 +249,31 @@ class ConvPINNBlock(nn.Module):
 
 class SPNNAutoencoder(nn.Module):
     """
-    SPNN-based autoencoder for 256x256 images.
+    SPNN-based autoencoder for 256x256 images (2-block architecture).
 
     Encoder path (forward):
-        3x256x256  ->  pixel_unshuffle(4)  ->  48x64x64
-        48x64x64   ->  ConvPINN(48->16)    ->  16x64x64
-        16x64x64   ->  pixel_unshuffle(2)  ->  64x32x32
-        64x32x32   ->  ConvPINN(64->4)     ->  4x32x32   (latent)
+        [3, 256, 256]  PixelUnshuffle(4)       -> [48, 64, 64]
+        [48, 64, 64]   ConvPINN(48 -> 16)      -> [16, 64, 64]   r: 16->32 (1:2)
+        [16, 64, 64]   PixelUnshuffle(2)       -> [64, 32, 32]
+        [64, 32, 32]   ConvPINN(64 ->  4)      -> [ 4, 32, 32]   r:  4->60 (1:15)
 
     Decoder path (pinv): reverses the above using s,t from forward + trained r networks.
     The latent is 4x32x32 = 4096 values, matching the SD-VAE latent shape.
     """
-    def __init__(self, mix_type="cayley", hidden=128, scale_bound=2.0):
+    def __init__(self, mix_type="cayley", hidden=128, r_hidden=256, scale_bound=2.0):
         super().__init__()
         self.blocks = nn.ModuleList([
             # Stage 1: 3x256x256 -> 48x64x64
             PixelUnshuffleBlock(4),
             # Stage 2: 48x64x64 -> 16x64x64
-            ConvPINNBlock(48, 16, hidden=hidden, scale_bound=scale_bound,
+            ConvPINNBlock(48, 16, hidden=hidden, r_hidden=r_hidden,
+                          scale_bound=scale_bound,
                           mix_type=mix_type, feat_size=64),
             # Stage 3: 16x64x64 -> 64x32x32
             PixelUnshuffleBlock(2),
             # Stage 4: 64x32x32 -> 4x32x32  (latent)
-            ConvPINNBlock(64, 4, hidden=hidden, scale_bound=scale_bound,
+            ConvPINNBlock(64, 4, hidden=hidden, r_hidden=r_hidden,
+                          scale_bound=scale_bound,
                           mix_type=mix_type, feat_size=32),
         ])
 
@@ -223,12 +289,4 @@ class SPNNAutoencoder(nn.Module):
             y = b.pinv(y)
         return y
 
-    def forward(self, x):
-        """Full encode-decode cycle."""
-        latent = self.encode(x)
-        recon = self.decode(latent)
-        return recon, latent
 
-    def pinn_blocks(self):
-        """Return only ConvPINNBlock instances (skip PixelUnshuffleBlocks)."""
-        return [b for b in self.blocks if isinstance(b, ConvPINNBlock)]
