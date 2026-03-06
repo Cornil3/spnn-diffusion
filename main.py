@@ -37,6 +37,8 @@ def parse_args():
                         help="Weight of cycle/surjectivity loss (0 to disable)")
     parser.add_argument("--lambda_roundtrip", type=float, default=0.3,
                         help="Weight of roundtrip/pseudo-inverse stability loss (0 to disable)")
+    parser.add_argument("--lambda_gan", type=float, default=0.2,
+                        help="Weight of PatchGAN adversarial loss (0 to disable)")
 
     # ── Train args ──
     parser.add_argument("--batch_size", type=int, default=16)
@@ -67,7 +69,7 @@ def parse_args():
     args.wandb_run_name = (
         f"{mode}_ep{args.num_epochs}_bs{args.batch_size}_lr{args.lr:.0e}"
         f"_sb{args.scale_bound}_lpips{args.lambda_lpips}"
-        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}"
+        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}_gan{args.lambda_gan}"
         f"_h{args.hidden}_{os.path.basename(args.output_dir)}"
     )
 

@@ -247,6 +247,48 @@ class ConvPINNBlock(nn.Module):
         return self.mix.inverse(x)
 
 
+def _conv_bn_act(n_in, n_out, **kwargs):
+    kwargs["bias"] = False
+    khw = 4 if kwargs.get("stride", 1) == 2 else 3
+    return nn.Sequential(
+        nn.Conv2d(n_in, n_out, khw, padding=1, **kwargs),
+        nn.BatchNorm2d(n_out),
+        nn.ReLU(inplace=True),
+    )
+
+
+class PatchDiscWithContext(nn.Module):
+    """
+    Conditional PatchGAN discriminator (from Seraena).
+    Takes image + latent context as input. Multi-layer scoring: every block
+    produces a 1x1-projected score map, all pooled to a common spatial size
+    and concatenated. Uses BatchNorm + ReLU instead of InstanceNorm + LeakyReLU.
+    """
+    def __init__(self, c_im=3, c_ctx=4):
+        super().__init__()
+        self.blocks = nn.Sequential(
+            _conv_bn_act(c_im + c_ctx, 64),
+            _conv_bn_act(64, 128, stride=2),
+            _conv_bn_act(128, 256, stride=2),
+            _conv_bn_act(256, 512, stride=2),
+            _conv_bn_act(512, 512),
+            _conv_bn_act(512, 512),
+        )
+        self.proj = nn.ModuleList(
+            nn.Conv2d(block[0].out_channels, 1, 1, bias=False)
+            for block in self.blocks
+        )
+
+    def forward(self, x, ctx):
+        out_hw = tuple(hw // 8 for hw in x.shape[-2:])
+        x = torch.cat([x, F.interpolate(ctx, x.shape[-2:], mode="bilinear", align_corners=False)], 1)
+        out = []
+        for block, proj in zip(self.blocks, self.proj):
+            x = block(x)
+            out.append(F.adaptive_avg_pool2d(proj(x), out_hw))
+        return torch.cat(out, 1)
+
+
 class SPNNAutoencoder(nn.Module):
     """
     SPNN-based autoencoder for 256x256 images (2-block architecture).
