@@ -1,0 +1,39 @@
+encoder:
+    in_channels: 3
+    resolution: 32
+    channels: 128
+    channel_multipliers: [1, 2,]
+    z_channels: 3
+    num_res_blocks: 2
+    dropout: 0.0
+    
+decoder:
+    in_channels: 3
+    out_channels: 3
+    resolution: 32
+    channels: 128
+    channel_multipliers: [1, 2,]
+    z_channels: 6
+    num_res_blocks: 2
+    dropout: 0.0
+
+vae:
+    embed_dim: 3
+    kld_weight: 1e-6
+
+sampler:
+    beta: 'sigmoid'
+    T: 1000
+    sampling_T: 50
+    eta: 1
+
+cond_encoder:
+    num_cond : 10
+    embed_dim : 512
+    cond_dim : 256 # Should be the same with 'cond_dim' in unet
+    cond_drop_prob: 0.2
+
+unet:
+    dim: 64
+    dim_mults: [1, 2, 4, 8]
+    cond_dim : 256

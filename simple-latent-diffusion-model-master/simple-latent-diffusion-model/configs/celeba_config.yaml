@@ -1,0 +1,33 @@
+encoder:
+    in_channels: 3
+    resolution: 128
+    channels: 128
+    channels_multipliers: [1, 2, 4]
+    z_channels: 3
+    num_res_blocks: 2
+    dropout: 0.0
+    
+decoder:
+    in_channels: 3
+    out_channels: 3
+    resolution: 128
+    channels: 128
+    channels_multipliers: [1, 2, 4]
+    z_channels: 6
+    num_res_blocks: 2
+    dropout: 0.0
+
+vae:
+    embed_dim: 3
+    kld_weight: 1e-6
+
+sampler:
+    beta: 'linear'
+    T: 1000
+    ddim_T: 100
+    ddim_eta: 1
+
+unet:
+    dim: 224
+    dim_mults: [1, 2, 3, 4]
+    channels: 3

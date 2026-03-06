@@ -1,0 +1,15 @@
+text_encoder:
+    number_of_features: 512
+    number_of_heads: 8
+    number_of_transformer_layers: 6
+    context_length: 77
+    embed_dim: 128
+    
+image_encoder:
+    in_channels: 3
+    resolution: 256
+    patch_size: 16
+    number_of_features: 768
+    number_of_heads: 12
+    number_of_transformer_layers: 4
+    embed_dim: 128

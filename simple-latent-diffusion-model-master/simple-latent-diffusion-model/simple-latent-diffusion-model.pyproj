@@ -1,0 +1,87 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>19323f22-218b-42fe-a02a-5cc7ae6c0659</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>sampling.py</StartupFile>
+    <SearchPath>
+    </SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>simple-latent-diffusion-model</Name>
+    <RootNamespace>simple-latent-diffusion-model</RootNamespace>
+    <InterpreterId>Global|PythonCore|3.13</InterpreterId>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="auto_encoder\components\distributions.py" />
+    <Compile Include="auto_encoder\components\nonlinearity.py" />
+    <Compile Include="auto_encoder\components\normalize.py" />
+    <Compile Include="auto_encoder\components\resnet_block.py" />
+    <Compile Include="auto_encoder\components\sampling.py" />
+    <Compile Include="clip\encoders\image_encoder.py" />
+    <Compile Include="clip\encoders\text_encoder.py" />
+    <Compile Include="clip\models\clip.py" />
+    <Compile Include="clip\models\ko_clip.py" />
+    <Compile Include="diffusion_model\models\clip_latent_diffusion_model.py" />
+    <Compile Include="diffusion_model\models\diffusion_model.py" />
+    <Compile Include="diffusion_model\network\blocks.py" />
+    <Compile Include="diffusion_model\network\timestep_embedding.py" />
+    <Compile Include="diffusion_model\network\unet_wrapper.py" />
+    <Compile Include="diffusion_model\sampler\base_sampler.py" />
+    <Compile Include="helper\cond_encoder.py" />
+    <Compile Include="helper\data_generator.py" />
+    <Compile Include="auto_encoder\models\auto_encoder.py" />
+    <Compile Include="auto_encoder\models\decoder.py" />
+    <Compile Include="auto_encoder\models\encoder.py" />
+    <Compile Include="auto_encoder\models\variational_auto_encoder.py" />
+    <Compile Include="helper\beta_generator.py" />
+    <Compile Include="helper\ema.py" />
+    <Compile Include="helper\loader.py" />
+    <Compile Include="helper\painter.py" />
+    <Compile Include="helper\tokenizer.py" />
+    <Compile Include="helper\trainer.py" />
+    <Compile Include="helper\util.py" />
+    <Compile Include="diffusion_model\models\latent_diffusion_model.py" />
+    <Compile Include="diffusion_model\network\attention.py" />
+    <Compile Include="diffusion_model\network\unet.py" />
+    <Compile Include="diffusion_model\sampler\ddim.py" />
+    <Compile Include="diffusion_model\sampler\ddpm.py" />
+    <Compile Include="sampling.py" />
+    <Compile Include="training.py" />
+    <Compile Include="training_clip.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="auto_encoder\" />
+    <Folder Include="auto_encoder\components\" />
+    <Folder Include="auto_encoder\models\" />
+    <Folder Include="clip\encoders\" />
+    <Folder Include="clip\models\" />
+    <Folder Include="diffusion_model\" />
+    <Folder Include="diffusion_model\models\" />
+    <Folder Include="diffusion_model\network\" />
+    <Folder Include="diffusion_model\sampler\" />
+    <Folder Include="helper\" />
+    <Folder Include="clip\" />
+  </ItemGroup>
+  <ItemGroup>
+    <InterpreterReference Include="Global|PythonCore|3.13" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+  <!-- Uncomment the CoreCompile target to enable the Build command in
+       Visual Studio and specify your pre- and post-build commands in
+       the BeforeBuild and AfterBuild targets below. -->
+  <!--<Target Name="CoreCompile" />-->
+  <Target Name="BeforeBuild">
+  </Target>
+  <Target Name="AfterBuild">
+  </Target>
+</Project>
