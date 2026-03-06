@@ -202,7 +202,7 @@ def train(args):
                 feat_loss.sum().backward(inputs=[correction])
                 corr_grad = correction.grad.detach().neg()
                 corr_grad.div_(corr_grad.std() + 1e-5)
-                correction_target = (spnn_decoded.detach() + corr_grad).detach()
+                correction_target = (spnn_decoded.detach() + 0.1 * corr_grad).detach()
 
                 # Generator GAN loss: MSE toward correction target
                 g_loss = mse_loss(spnn_decoded, correction_target)
@@ -225,11 +225,20 @@ def train(args):
                 spnn_recon = spnn.decode(spnn_latent)
                 roundtrip_loss = mse_loss(spnn_recon, images)
 
+            # ── Latent alignment loss: SPNN.encode(x) ≈ VAE.encode(x) ──
+            align_loss = torch.tensor(0.0, device=DEVICE)
+            if args.lambda_align > 0:
+                with torch.no_grad():
+                    z_vae = vae.encode(images).latent_dist.mode() * vae.config.scaling_factor
+                z_spnn = spnn.encode(images)
+                align_loss = mse_loss(z_spnn, z_vae)
+
             loss = (decoder_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
-                    + args.lambda_gan * g_loss)
+                    + args.lambda_gan * g_loss
+                    + args.lambda_align * align_loss)
 
             optimizer.zero_grad()
             loss.backward()
@@ -248,6 +257,7 @@ def train(args):
                 "train/lpips_loss": lpips_loss.item(),
                 "train/cycle_loss": cycle_loss.item(),
                 "train/roundtrip_loss": roundtrip_loss.item(),
+                "train/align_loss": align_loss.item(),
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": grad_norm.item(),
             }

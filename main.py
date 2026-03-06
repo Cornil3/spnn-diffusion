@@ -1,8 +1,10 @@
 import argparse
 import os
+import torch
 import wandb
 from train import train
 from run_test_cycles import run_test
+from diagnostics import latent_alignment_check, cross_decode_check
 
 
 def parse_args():
@@ -37,8 +39,10 @@ def parse_args():
                         help="Weight of cycle/surjectivity loss (0 to disable)")
     parser.add_argument("--lambda_roundtrip", type=float, default=0.3,
                         help="Weight of roundtrip/pseudo-inverse stability loss (0 to disable)")
-    parser.add_argument("--lambda_gan", type=float, default=0.2,
+    parser.add_argument("--lambda_gan", type=float, default=0.0,
                         help="Weight of PatchGAN adversarial loss (0 to disable)")
+    parser.add_argument("--lambda_align", type=float, default=0.5,
+                        help="Weight of latent alignment loss (0 to disable)")
 
     # ── Train args ──
     parser.add_argument("--batch_size", type=int, default=16)
@@ -69,27 +73,83 @@ def parse_args():
     args.wandb_run_name = (
         f"{mode}_ep{args.num_epochs}_bs{args.batch_size}_lr{args.lr:.0e}"
         f"_sb{args.scale_bound}_lpips{args.lambda_lpips}"
-        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}_gan{args.lambda_gan}"
+        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}_gan{args.lambda_gan}_align{args.lambda_align}"
         f"_h{args.hidden}_{os.path.basename(args.output_dir)}"
     )
 
     return args
 
 
+def run_latent_diagnostics(args):
+    """Run latent alignment and cross-decode checks against the VAE."""
+    from torch.utils.data import DataLoader
+    from diffusers import AutoencoderKL
+    from models import SPNNAutoencoder
+    from dataset import CelebAHQDataset, LAIONAestheticDataset
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"\n{'='*50}")
+    print(f"Latent Space Diagnostics")
+    print(f"{'='*50}")
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"Device: {device}")
+
+    # Load VAE
+    print("Loading SD-VAE...")
+    vae = AutoencoderKL.from_pretrained("timbrooks/instruct-pix2pix", subfolder="vae")
+    vae.eval().to(device)
+    for p in vae.parameters():
+        p.requires_grad = False
+
+    # Load SPNN
+    print(f"Loading SPNN from {args.checkpoint}...")
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, scale_bound=args.scale_bound)
+    state = torch.load(args.checkpoint, map_location=device, weights_only=True)
+    if "model_state_dict" in state:
+        state = state["model_state_dict"]
+    spnn.load_state_dict(state)
+    spnn.eval().to(device)
+
+    # Test dataset
+    if args.dataset == "laion":
+        test_dataset = LAIONAestheticDataset(
+            data_dir=args.laion_dir, img_size=args.img_size,
+            split="test", n_test=args.n_test,
+        )
+    else:
+        test_dataset = CelebAHQDataset(
+            img_size=args.img_size, split="test", n_test=args.n_test,
+        )
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    print(f"Test set: {len(test_dataset)} images")
+
+    # Test 1: Latent alignment (all test samples)
+    latent_alignment_check(spnn, vae, test_loader, device)
+
+    # Test 2: Cross-decode (5 images)
+    diag_dir = "latent_diagnostics"
+    cross_decode_check(spnn, vae, test_loader, device, diag_dir, num_images=5)
+
+
 if __name__ == "__main__":
     args = parse_args()
 
-    if not args.train and not args.test:
-        print("Specify --train and/or --test")
+    if not args.train and not args.test and not os.path.exists(args.checkpoint):
+        print("Specify --train and/or --test, or provide a valid --checkpoint for diagnostics")
         exit(1)
 
-    wandb.init(project=args.wandb_project, entity=args.wandb_entity,
-               name=args.wandb_run_name, config=vars(args))
+    if args.train or args.test:
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                   name=args.wandb_run_name, config=vars(args))
 
-    if args.train:
-        train(args)
+        if args.train:
+            train(args)
 
-    if args.test:
-        run_test(args)
+        if args.test:
+            run_test(args)
 
-    wandb.finish()
+        wandb.finish()
+
+    # Latent space diagnostics — runs whenever a checkpoint exists
+    if os.path.exists(args.checkpoint):
+        run_latent_diagnostics(args)

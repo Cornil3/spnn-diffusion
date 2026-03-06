@@ -1,5 +1,7 @@
+import os
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -60,3 +62,133 @@ def print_penrose_metrics(metrics):
     print(f"    g(g'(g(x))) ≈ g(x)    | MSE: {metrics['penrose/ggg_eq_g']:.2e}")
     print(f"    g'(g(g'(z))) ≈ g'(z)  | MSE: {metrics['penrose/gpggp_eq_gp']:.2e}")
     print(f"    g(g'(z)) ≈ z           | MSE: {metrics['penrose/ggp_eq_id']:.2e}")
+
+
+@torch.no_grad()
+def latent_alignment_check(spnn, vae, dataloader, device):
+    """
+    Test 1: Compare SPNN.encode(x) vs VAE.encode(x) over the full test set.
+    Checks whether SPNN's latent space aligns with the VAE's, which is
+    required for compatibility with pre-trained diffusion models.
+
+    Returns dict with MSE and cosine similarity metrics.
+    """
+    spnn.eval()
+    scaling = vae.config.scaling_factor
+
+    total_mse = 0.0
+    total_cos = 0.0
+    n = 0
+    num_el = None
+
+    for images in tqdm(dataloader, desc="Latent alignment"):
+        images = images.to(device)
+
+        z_spnn = spnn.encode(images)
+        z_vae = vae.encode(images).latent_dist.mode() * scaling
+
+        bs = images.size(0)
+        if num_el is None:
+            num_el = z_spnn[0].numel()
+
+        total_mse += F.mse_loss(z_spnn, z_vae, reduction="sum").item()
+        cos = F.cosine_similarity(
+            z_spnn.view(bs, -1), z_vae.view(bs, -1), dim=1
+        ).sum().item()
+        total_cos += cos
+        n += bs
+
+    metrics = {
+        "latent_align/mse": total_mse / (n * num_el),
+        "latent_align/cosine_sim": total_cos / n,
+        "latent_align/num_samples": n,
+    }
+
+    print(f"\n{'='*50}")
+    print(f"Latent Alignment Check ({n} samples)")
+    print(f"{'='*50}")
+    print(f"  MSE(z_spnn, z_vae):    {metrics['latent_align/mse']:.6f}")
+    print(f"  Cosine similarity:     {metrics['latent_align/cosine_sim']:.6f}")
+    print(f"  (cosine=1.0 means perfect alignment)")
+
+    return metrics
+
+
+@torch.no_grad()
+def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
+    """
+    Test 2: Encode with SPNN, decode with VAE. If VAE can decode SPNN's
+    latents into good images, then SPNN encodes into the VAE's latent space
+    and diffusion will work.
+
+    Saves a 4-column grid per image:
+        Original | VAE(VAE(x)) | VAE(SPNN(x)) | SPNN(SPNN(x))
+
+    Returns list of (vae_mse, cross_mse) per image.
+    """
+    from torchvision.utils import save_image
+
+    spnn.eval()
+    os.makedirs(output_dir, exist_ok=True)
+    scaling = vae.config.scaling_factor
+
+    def to_disp(t):
+        return ((t.cpu() + 1) / 2).clamp(0, 1)
+
+    count = 0
+    all_mse = []
+
+    print(f"\n{'='*50}")
+    print(f"Cross-Decode Check ({num_images} images)")
+    print(f"{'='*50}")
+    print(f"  Grid: Original | VAE(VAE(x)) | VAE(SPNN(x)) | SPNN(SPNN(x))")
+    print()
+
+    for images in dataloader:
+        images = images.to(device)
+        for i in range(images.size(0)):
+            if count >= num_images:
+                break
+
+            x = images[i:i+1]
+
+            # VAE encode + decode (baseline)
+            z_vae = vae.encode(x).latent_dist.mode()
+            vae_recon = vae.decode(z_vae).sample
+
+            # SPNN encode (produces scaled latent)
+            z_spnn = spnn.encode(x)
+
+            # Cross-decode: VAE decodes SPNN's latent (unscale for VAE)
+            cross_recon = vae.decode(z_spnn / scaling).sample
+
+            # SPNN roundtrip
+            spnn_recon = spnn.decode(z_spnn)
+
+            # Per-image metrics
+            vae_mse = F.mse_loss(vae_recon, x).item()
+            cross_mse = F.mse_loss(cross_recon, x).item()
+            spnn_mse = F.mse_loss(spnn_recon, x).item()
+            z_mse = F.mse_loss(z_spnn, z_vae * scaling).item()
+            all_mse.append((vae_mse, cross_mse))
+
+            print(f"  Image {count}: VAE recon MSE={vae_mse:.6f}  "
+                  f"Cross-decode MSE={cross_mse:.6f}  "
+                  f"SPNN roundtrip MSE={spnn_mse:.6f}  "
+                  f"Latent MSE={z_mse:.6f}")
+
+            # Save grid
+            grid = torch.cat([
+                to_disp(x), to_disp(vae_recon),
+                to_disp(cross_recon), to_disp(spnn_recon),
+            ], dim=0)
+            path = os.path.join(output_dir, f"cross_decode_{count:03d}.png")
+            save_image(grid, path, nrow=4, padding=4, pad_value=1.0)
+            count += 1
+
+        if count >= num_images:
+            break
+
+    print(f"\n  Saved {count} grids to {output_dir}/")
+    print(f"  If cross-decode (col 3) looks good, SPNN latents are diffusion-compatible.")
+    return all_mse
