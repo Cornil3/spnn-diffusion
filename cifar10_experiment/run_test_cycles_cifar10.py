@@ -123,6 +123,8 @@ def run_test(args):
     all_penrose = []
 
     for img_idx, (original, _label) in enumerate(tqdm(loader, desc="Testing")):
+        if args.num_test_images > 0 and img_idx >= args.num_test_images:
+            break
         original = original.to(DEVICE)
 
         # ── Penrose checks ──
@@ -355,7 +357,9 @@ def parse_args():
         description="CIFAR-10 SPNN cycle-consistency test (mirrors run_test_cycles.py)")
     p.add_argument("--checkpoint", type=str, required=True,
                    help="SPNN model checkpoint path")
-    p.add_argument("--num_cycles", type=int, default=50)
+    p.add_argument("--num_cycles", type=int, default=5)
+    p.add_argument("--num_test_images", type=int, default=0,
+                   help="Limit number of test images (0=all)")
     p.add_argument("--num_save_images", type=int, default=30)
     p.add_argument("--sample_dir", type=str,
                    default="cifar10_experiment/samples")

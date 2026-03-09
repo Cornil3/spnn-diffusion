@@ -25,6 +25,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from cifar10_experiment.train_cifar10 import (
     SPNNAutoencoderConfigurable, CIFAR10_STAGES, _load_checkpoint)
+from cifar10_experiment.train_ldm_with_spnn import SPNNAsVAE
 
 # ── Simple LDM ──
 SLDM_ROOT = os.path.join(os.path.dirname(__file__), '..',
@@ -135,26 +136,8 @@ class HybridCodec:
 # Model loading
 # ═══════════════════════════════════════════════════════════
 
-def load_models(args):
-    """Load LDM (UNet + DDIM + VAE) and SPNN."""
-    # VAE
-    vae = VariationalAutoEncoder(CONFIG_PATH)
-    vae = _load_checkpoint(vae, os.path.join(SLDM_ROOT, 'models', 'cifar_vae.pth'))
-    vae.eval().to(DEVICE)
-    for p in vae.parameters():
-        p.requires_grad = False
-
-    # LDM
-    sampler = DDIM(CONFIG_PATH)
-    cond_encoder = ClassEncoder(CONFIG_PATH)
-    network = UnetWrapper(Unet, CONFIG_PATH, cond_encoder)
-    ldm = LatentDiffusionModel(network, sampler, vae)
-    ldm = _load_checkpoint(ldm, args.ldm_path)
-    ldm.eval().to(DEVICE)
-    for p in ldm.parameters():
-        p.requires_grad = False
-
-    # SPNN
+def load_spnn(args):
+    """Load SPNN model from checkpoint."""
     print(f"Loading SPNN from {args.checkpoint}...")
     spnn = SPNNAutoencoderConfigurable(
         stages=CIFAR10_STAGES,
@@ -167,6 +150,39 @@ def load_models(args):
         state = state["model_state_dict"]
     spnn.load_state_dict(state)
     spnn.eval().to(DEVICE)
+    return spnn
+
+
+def load_models(args):
+    """Load LDM (UNet + DDIM + autoencoder) and SPNN."""
+    # VAE (always needed for VAE codec comparison)
+    vae = VariationalAutoEncoder(CONFIG_PATH)
+    vae = _load_checkpoint(vae, os.path.join(SLDM_ROOT, 'models', 'cifar_vae.pth'))
+    vae.eval().to(DEVICE)
+    for p in vae.parameters():
+        p.requires_grad = False
+
+    # SPNN
+    spnn = load_spnn(args)
+
+    # LDM — build with matching auto_encoder for the checkpoint
+    sampler = DDIM(CONFIG_PATH)
+    cond_encoder = ClassEncoder(CONFIG_PATH)
+    network = UnetWrapper(Unet, CONFIG_PATH, cond_encoder)
+
+    if args.spnn_ldm:
+        spnn_vae = SPNNAsVAE(spnn)
+        ldm = LatentDiffusionModel(network, sampler, spnn_vae)
+        ldm = _load_checkpoint(ldm, args.ldm_path)
+        print(f"Loaded SPNN-trained LDM from {args.ldm_path}")
+    else:
+        ldm = LatentDiffusionModel(network, sampler, vae)
+        ldm = _load_checkpoint(ldm, args.ldm_path)
+        print(f"Loaded original LDM from {args.ldm_path}")
+
+    ldm.eval().to(DEVICE)
+    for p in ldm.parameters():
+        p.requires_grad = False
 
     return ldm, vae, spnn
 
@@ -362,6 +378,8 @@ def parse_args():
     p.add_argument("--ldm_path", type=str,
                    default=os.path.join(SLDM_ROOT, 'models', 'cifar_ldm.pth'),
                    help="Trained LDM checkpoint path")
+    p.add_argument("--spnn_ldm", action="store_true",
+                   help="Set if ldm_path points to an SPNN-trained LDM checkpoint")
     p.add_argument("--problems", nargs="+", default=["sr2x", "inpaint"],
                    choices=list(DEGRADATION_REGISTRY.keys()))
     p.add_argument("--num_images_per_class", type=int, default=1,
@@ -369,8 +387,8 @@ def parse_args():
     p.add_argument("--guidance_scale", type=float, default=3.0)
     # SPNN model args
     p.add_argument("--mix_type", type=str, default="cayley")
-    p.add_argument("--hidden", type=int, default=64)
-    p.add_argument("--scale_bound", type=float, default=2.0)
+    p.add_argument("--hidden", type=int, default=256)
+    p.add_argument("--scale_bound", type=float, default=0.2)
     return p.parse_args()
 
 

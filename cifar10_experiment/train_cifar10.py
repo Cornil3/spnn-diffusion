@@ -36,6 +36,37 @@ CONFIG_PATH = os.path.join(SLDM_ROOT, 'configs', 'cifar10_config.yaml')
 
 
 # ═══════════════════════════════════════════════════════════
+# Latent Discriminator for adversarial distribution matching
+# ═══════════════════════════════════════════════════════════
+
+class LatentDiscriminator(nn.Module):
+    """
+    Lightweight discriminator on latent space (e.g. 3x16x16).
+    Uses spectral normalization for stable GAN training.
+    Classifies latents as VAE-encoded (real) vs SPNN-encoded (fake).
+    """
+    def __init__(self, in_ch=3, spatial=16):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.utils.spectral_norm(nn.Conv2d(in_ch, 64, 3, stride=2, padding=1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(64, 128, 3, stride=2, padding=1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.utils.spectral_norm(nn.Conv2d(128, 256, 3, stride=2, padding=1)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.utils.spectral_norm(nn.Linear(256, 1)),
+        )
+
+    def forward(self, z):
+        return self.net(z)
+
+
+# ═══════════════════════════════════════════════════════════
 # Configurable SPNN Autoencoder
 # ═══════════════════════════════════════════════════════════
 
@@ -57,10 +88,8 @@ class SPNNAutoencoderConfigurable(nn.Module):
     """
 
     def __init__(self, stages, mix_type="cayley", hidden=64,
-                 r_hidden=None, scale_bound=2.0):
+                 scale_bound=2.0):
         super().__init__()
-        if r_hidden is None:
-            r_hidden = hidden * 2
         blocks = []
         for stage in stages:
             if stage[0] == 'unshuffle':
@@ -68,7 +97,7 @@ class SPNNAutoencoderConfigurable(nn.Module):
             elif stage[0] == 'pinn':
                 _, in_ch, out_ch, feat_size = stage
                 blocks.append(ConvPINNBlock(
-                    in_ch, out_ch, hidden=hidden, r_hidden=r_hidden,
+                    in_ch, out_ch, hidden=hidden,
                     scale_bound=scale_bound, mix_type=mix_type,
                     feat_size=feat_size,
                 ))
@@ -169,9 +198,16 @@ def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sampl
 def train(args):
     print(f"Device: {DEVICE}")
 
+    # Build run name from loss lambdas
+    run_name = (f"dec1_lp{args.lambda_lpips}_cy{args.lambda_cycle}"
+                f"_rt{args.lambda_roundtrip}_al{args.lambda_align}"
+                f"_adv{args.lambda_adv}_h{args.hidden}")
+    args.output_dir = os.path.join(args.output_dir, run_name)
+
     os.makedirs(args.output_dir, exist_ok=True)
     sample_dir = os.path.join(args.output_dir, "samples")
     os.makedirs(sample_dir, exist_ok=True)
+    print(f"Output dir: {args.output_dir}")
 
     # ── Dataset ──
     train_loader, test_loader = get_cifar10_loaders(
@@ -210,6 +246,18 @@ def train(args):
     del test_iter
     print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
 
+    # ── Adversarial latent discriminator ──
+    use_adv = args.lambda_adv > 0
+    disc = None
+    disc_optimizer = None
+    if use_adv:
+        in_ch, spatial = penrose_latent.shape[1], penrose_latent.shape[2]
+        disc = LatentDiscriminator(in_ch=in_ch, spatial=spatial).to(DEVICE)
+        disc_optimizer = torch.optim.Adam(disc.parameters(), lr=args.lr_disc,
+                                          betas=(0.0, 0.9))
+        d_params = sum(p.numel() for p in disc.parameters())
+        print(f"Adversarial loss enabled: discriminator {d_params:,} params")
+
     # ── Optimizer ──
     optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -217,7 +265,11 @@ def train(args):
     mse_loss = nn.MSELoss()
 
     # ── WandB ──
-    wandb.init(project="spnn-cifar10", config=vars(args))
+    wandb.init(project="spnn-cifar10", name=f"train_cifar10/{run_name}",
+               config=vars(args))
+
+    best_loss = float('inf')
+    ckpt_path = os.path.join(args.output_dir, "spnn_cifar10_best.pt")
 
     for epoch in range(1, args.num_epochs + 1):
         spnn.train()
@@ -256,19 +308,38 @@ def train(args):
                 spnn_recon = spnn.decode(spnn_latent)
                 roundtrip_loss = mse_loss(spnn_recon, images)
 
-            # ── Latent alignment: SPNN.encode(x) ≈ VAE.encode(x) ──
+            # ── Encoder latents (shared by align + adversarial) ──
             align_loss = torch.tensor(0.0, device=DEVICE)
-            if args.lambda_align > 0:
-                with torch.no_grad():
-                    z_vae = vae.encode(images).mode()
+            d_loss = torch.tensor(0.0, device=DEVICE)
+            g_loss = torch.tensor(0.0, device=DEVICE)
+
+            if args.lambda_align > 0 or use_adv:
                 z_spnn = spnn.encode(images)
-                align_loss = mse_loss(z_spnn, z_vae)
+
+                # Latent alignment: SPNN.encode(x) ≈ VAE.encode(x)
+                if args.lambda_align > 0:
+                    align_loss = mse_loss(z_spnn, vae_latent)
+
+                # Adversarial: train D then compute G loss
+                if use_adv:
+                    # (a) Discriminator step
+                    disc_optimizer.zero_grad()
+                    d_real = disc(vae_latent.detach())
+                    d_fake = disc(z_spnn.detach())
+                    d_loss = (F.relu(1.0 - d_real).mean()
+                              + F.relu(1.0 + d_fake).mean())
+                    d_loss.backward()
+                    disc_optimizer.step()
+
+                    # (b) Generator loss for encoder
+                    g_loss = -disc(z_spnn).mean()
 
             loss = (decoder_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
-                    + args.lambda_align * align_loss)
+                    + args.lambda_align * align_loss
+                    + args.lambda_adv * g_loss)
 
             optimizer.zero_grad()
             loss.backward()
@@ -283,7 +354,7 @@ def train(args):
 
             epoch_loss += loss.item()
 
-            wandb.log({
+            log_dict = {
                 "train/loss": loss.item(),
                 "train/decoder_loss": decoder_loss.item(),
                 "train/lpips_loss": lpips_loss.item(),
@@ -292,7 +363,11 @@ def train(args):
                 "train/align_loss": align_loss.item(),
                 "train/lr": scheduler.get_last_lr()[0],
                 "train/grad_norm": grad_norm.item(),
-            })
+            }
+            if use_adv:
+                log_dict["train/d_loss"] = d_loss.item()
+                log_dict["train/g_loss"] = g_loss.item()
+            wandb.log(log_dict)
 
             pbar.set_postfix({
                 "loss": f"{loss.item():.4f}",
@@ -303,7 +378,7 @@ def train(args):
         wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
         print(f"  Epoch {epoch} — avg loss: {avg_loss:.6f}")
 
-        # ── Penrose diagnostics + checkpoint ──
+        # ── Penrose diagnostics ──
         if epoch % args.save_every == 0:
             p_metrics = penrose_check(spnn, penrose_images, penrose_latent, DEVICE)
             print_penrose_metrics(p_metrics)
@@ -317,8 +392,9 @@ def train(args):
             save_comparison(sample_decoded, vae_dec, penrose_images[:4],
                             epoch, 0, sample_dir)
 
-            ckpt_path = os.path.join(args.output_dir,
-                                     f"spnn_cifar10_epoch{epoch:03d}.pt")
+        # ── Save best model ──
+        if avg_loss < best_loss:
+            best_loss = avg_loss
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": spnn.state_dict(),
@@ -326,12 +402,10 @@ def train(args):
                 "loss": avg_loss,
                 "stages": CIFAR10_STAGES,
             }, ckpt_path)
-            print(f"  Saved checkpoint: {ckpt_path}")
+            print(f"  New best loss: {avg_loss:.6f} — saved: {ckpt_path}")
 
-    # ── Final save ──
-    final_path = os.path.join(args.output_dir, "spnn_cifar10_final.pt")
-    torch.save(spnn.state_dict(), final_path)
-    print(f"\nTraining complete. Final model: {final_path}")
+    print(f"\nTraining complete. Best loss: {best_loss:.6f}")
+    print(f"Best model: {ckpt_path}")
     wandb.finish()
 
 
@@ -340,7 +414,7 @@ def parse_args():
     p.add_argument("--num_epochs", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--hidden", type=int, default=64)
+    p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--mix_type", type=str, default="cayley",
                    choices=["cayley", "householder"])
     p.add_argument("--scale_bound", type=float, default=2.0)
@@ -348,6 +422,10 @@ def parse_args():
     p.add_argument("--lambda_cycle", type=float, default=1.0)
     p.add_argument("--lambda_roundtrip", type=float, default=1.0)
     p.add_argument("--lambda_align", type=float, default=0.1)
+    p.add_argument("--lambda_adv", type=float, default=0.0,
+                   help="Adversarial latent matching weight (0=disabled)")
+    p.add_argument("--lr_disc", type=float, default=1e-4,
+                   help="Discriminator learning rate")
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--save_every", type=int, default=5)
     p.add_argument("--penrose_batch_size", type=int, default=32)
