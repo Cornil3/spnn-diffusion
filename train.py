@@ -36,9 +36,8 @@ def get_vae_pairs(vae, images):
     """
     posterior = vae.encode(images).latent_dist
     latent = posterior.mode()
-    scaled_latent = latent * vae.config.scaling_factor
     decoded = vae.decode(latent).sample
-    return scaled_latent, decoded
+    return latent, decoded
 
 def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sample_dir):
     from torchvision.utils import save_image
@@ -229,7 +228,7 @@ def train(args):
             align_loss = torch.tensor(0.0, device=DEVICE)
             if args.lambda_align > 0:
                 with torch.no_grad():
-                    z_vae = vae.encode(images).latent_dist.mode() * vae.config.scaling_factor
+                    z_vae = vae.encode(images).latent_dist.mode()
                 z_spnn = spnn.encode(images)
                 align_loss = mse_loss(z_spnn, z_vae)
 
