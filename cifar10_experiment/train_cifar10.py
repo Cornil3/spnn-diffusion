@@ -19,6 +19,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 import wandb
+from accelerate import Accelerator
 
 # ── SPNN building blocks from parent project ──
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -103,6 +104,10 @@ class SPNNAutoencoderConfigurable(nn.Module):
                 ))
         self.blocks = nn.ModuleList(blocks)
 
+    def forward(self, x):
+        """Forward pass = encode. Required for DDP wrapping."""
+        return self.encode(x)
+
     def encode(self, x):
         for b in self.blocks:
             x = b(x)
@@ -139,13 +144,30 @@ def _load_checkpoint(model, path):
 
 def load_simple_vae():
     """Load frozen Simple LDM VAE from pretrained checkpoint."""
+    return load_simple_vae_to(DEVICE)
+
+
+def load_simple_vae_to(device):
+    """Load frozen Simple LDM VAE from pretrained checkpoint to given device."""
     vae = VariationalAutoEncoder(CONFIG_PATH)
     model_path = os.path.join(SLDM_ROOT, 'models', 'cifar_vae.pth')
-    vae = _load_checkpoint(vae, model_path)
+    ckpt = torch.load(model_path, map_location=device, weights_only=True)
+    from helper.ema import EMA
+    for ema_key in ('ema_state_dict', 'ema_model_state_dict'):
+        if isinstance(ckpt, dict) and ema_key in ckpt:
+            ema = EMA(vae)
+            ema.load_state_dict(ckpt[ema_key])
+            vae = ema.ema_model
+            break
+    else:
+        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            vae.load_state_dict(ckpt['model_state_dict'])
+        else:
+            vae.load_state_dict(ckpt)
     vae.eval()
     for p in vae.parameters():
         p.requires_grad = False
-    return vae.to(DEVICE)
+    return vae.to(device)
 
 
 @torch.no_grad()
@@ -196,77 +218,104 @@ def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sampl
 
 
 def train(args):
-    print(f"Device: {DEVICE}")
+    # ── Accelerator (handles DDP, mixed precision, device placement) ──
+    accelerator = Accelerator(mixed_precision='fp16')
+    device = accelerator.device
+    is_main = accelerator.is_main_process
+
+    if is_main:
+        print(f"Device: {device}  |  Num processes: {accelerator.num_processes}")
 
     # Build run name from loss lambdas
     run_name = (f"dec1_lp{args.lambda_lpips}_cy{args.lambda_cycle}"
                 f"_rt{args.lambda_roundtrip}_al{args.lambda_align}"
-                f"_adv{args.lambda_adv}_h{args.hidden}")
+                f"_mm{args.lambda_moment}_adv{args.lambda_adv}_h{args.hidden}")
     args.output_dir = os.path.join(args.output_dir, run_name)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    sample_dir = os.path.join(args.output_dir, "samples")
-    os.makedirs(sample_dir, exist_ok=True)
-    print(f"Output dir: {args.output_dir}")
+    if is_main:
+        os.makedirs(args.output_dir, exist_ok=True)
+        sample_dir = os.path.join(args.output_dir, "samples")
+        os.makedirs(sample_dir, exist_ok=True)
+        print(f"Output dir: {args.output_dir}")
 
     # ── Dataset ──
     train_loader, test_loader = get_cifar10_loaders(
         args.batch_size, args.num_workers)
-    print(f"CIFAR-10: {len(train_loader.dataset)} train, "
-          f"{len(test_loader.dataset)} test, {len(train_loader)} batches/epoch")
+    if is_main:
+        print(f"CIFAR-10: {len(train_loader.dataset)} train, "
+              f"{len(test_loader.dataset)} test, {len(train_loader)} batches/epoch")
 
-    # ── Models ──
-    vae = load_simple_vae()
+    # ── Frozen models (not wrapped by accelerate — just move to device) ──
+    vae = load_simple_vae_to(device)
 
     spnn = SPNNAutoencoderConfigurable(
         stages=CIFAR10_STAGES,
         mix_type=args.mix_type,
         hidden=args.hidden,
         scale_bound=args.scale_bound,
-    ).to(DEVICE)
+    ).to(device)
+
+    if args.resume:
+        if is_main:
+            print(f"Resuming from {args.resume}...")
+        state = torch.load(args.resume, map_location=device, weights_only=True)
+        if "model_state_dict" in state:
+            state = state["model_state_dict"]
+        spnn.load_state_dict(state)
 
     total_params = sum(p.numel() for p in spnn.parameters())
-    print(f"SPNN total params: {total_params:,}")
+    if is_main:
+        print(f"SPNN total params: {total_params:,}")
 
-    # ── LPIPS (upsample to 64x64 for reliability at 32px) ──
+    # ── LPIPS (frozen, not wrapped) ──
     import lpips
     lpips_fn = None
     if args.lambda_lpips > 0:
-        lpips_fn = lpips.LPIPS(net="vgg").to(DEVICE)
+        lpips_fn = lpips.LPIPS(net="vgg").to(device)
         lpips_fn.eval()
         for p in lpips_fn.parameters():
             p.requires_grad = False
-        print("LPIPS loss enabled (upsample to 64x64)")
+        if is_main:
+            print("LPIPS loss enabled (upsample to 64x64)")
 
     # ── Fixed test batch for Penrose checks ──
     test_iter = iter(test_loader)
     penrose_images, _ = next(test_iter)
-    penrose_images = penrose_images[:args.penrose_batch_size].to(DEVICE)
+    penrose_images = penrose_images[:args.penrose_batch_size].to(device)
     penrose_latent, _ = get_vae_pairs(vae, penrose_images)
     del test_iter
-    print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
+    if is_main:
+        print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
 
-    # ── Adversarial latent discriminator ──
+    # ── Adversarial latent discriminator (not wrapped — only SPNN gets DDP) ──
     use_adv = args.lambda_adv > 0
     disc = None
     disc_optimizer = None
     if use_adv:
         in_ch, spatial = penrose_latent.shape[1], penrose_latent.shape[2]
-        disc = LatentDiscriminator(in_ch=in_ch, spatial=spatial).to(DEVICE)
+        disc = LatentDiscriminator(in_ch=in_ch, spatial=spatial).to(device)
         disc_optimizer = torch.optim.Adam(disc.parameters(), lr=args.lr_disc,
                                           betas=(0.0, 0.9))
-        d_params = sum(p.numel() for p in disc.parameters())
-        print(f"Adversarial loss enabled: discriminator {d_params:,} params")
+        if is_main:
+            d_params = sum(p.numel() for p in disc.parameters())
+            print(f"Adversarial loss enabled: discriminator {d_params:,} params")
 
-    # ── Optimizer ──
+    # ── Optimizer (created before prepare) ──
     optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    # ── Accelerate prepare (wraps model with DDP, splits dataloader) ──
+    spnn, optimizer, train_loader = accelerator.prepare(
+        spnn, optimizer, train_loader)
+
+    # ── Scheduler (created AFTER prepare so len(train_loader) is per-GPU) ──
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_epochs * len(train_loader), eta_min=1e-6)
     mse_loss = nn.MSELoss()
 
-    # ── WandB ──
-    wandb.init(project="spnn-cifar10", name=f"train_cifar10/{run_name}",
-               config=vars(args))
+    # ── WandB (rank 0 only) ──
+    if is_main:
+        wandb.init(project="spnn-cifar10", name=f"train_cifar10/{run_name}",
+                   config=vars(args))
 
     best_loss = float('inf')
     ckpt_path = os.path.join(args.output_dir, "spnn_cifar10_best.pt")
@@ -275,19 +324,24 @@ def train(args):
         spnn.train()
         epoch_loss = 0.0
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}",
+                    disable=not is_main)
+        unwrapped = accelerator.unwrap_model(spnn)
         for batch_idx, (images, _labels) in enumerate(pbar):
-            images = images.to(DEVICE)
+            images = images.to(device)
 
             # ── VAE targets ──
             vae_latent, vae_decoded = get_vae_pairs(vae, images)
 
+            # ── Encode through DDP (arms gradient sync reducer) ──
+            z_spnn = spnn(images)
+
             # ── Decoder loss: feed VAE latent, match VAE output ──
-            spnn_decoded = spnn.decode(vae_latent)
+            spnn_decoded = unwrapped.decode(vae_latent)
             decoder_loss = mse_loss(spnn_decoded, vae_decoded)
 
             # ── LPIPS (upsample to 64x64) ──
-            lpips_loss = torch.tensor(0.0, device=DEVICE)
+            lpips_loss = torch.tensor(0.0, device=device)
             if lpips_fn is not None:
                 up_spnn = F.interpolate(spnn_decoded, size=64, mode='bilinear',
                                         align_corners=False)
@@ -296,117 +350,129 @@ def train(args):
                 lpips_loss = lpips_fn(up_spnn, up_vae).mean()
 
             # ── Cycle loss: encode(decode(z)) ≈ z ──
-            cycle_loss = torch.tensor(0.0, device=DEVICE)
+            cycle_loss = torch.tensor(0.0, device=device)
             if args.lambda_cycle > 0:
-                re_encoded = spnn.encode(spnn_decoded)
+                re_encoded = unwrapped.encode(spnn_decoded)
                 cycle_loss = mse_loss(re_encoded, vae_latent)
 
             # ── Roundtrip loss: decode(encode(x)) ≈ x ──
-            roundtrip_loss = torch.tensor(0.0, device=DEVICE)
+            roundtrip_loss = torch.tensor(0.0, device=device)
             if args.lambda_roundtrip > 0:
-                spnn_latent = spnn.encode(images)
-                spnn_recon = spnn.decode(spnn_latent)
+                spnn_recon = unwrapped.decode(z_spnn)
                 roundtrip_loss = mse_loss(spnn_recon, images)
 
-            # ── Encoder latents (shared by align + adversarial) ──
-            align_loss = torch.tensor(0.0, device=DEVICE)
-            d_loss = torch.tensor(0.0, device=DEVICE)
-            g_loss = torch.tensor(0.0, device=DEVICE)
+            # ── Encoder latents for align + moment + adversarial ──
+            align_loss = torch.tensor(0.0, device=device)
+            moment_loss = torch.tensor(0.0, device=device)
+            d_loss = torch.tensor(0.0, device=device)
+            g_loss = torch.tensor(0.0, device=device)
 
-            if args.lambda_align > 0 or use_adv:
-                z_spnn = spnn.encode(images)
+            # Latent alignment: SPNN.encode(x) ≈ VAE.encode(x)
+            if args.lambda_align > 0:
+                align_loss = mse_loss(z_spnn, vae_latent)
 
-                # Latent alignment: SPNN.encode(x) ≈ VAE.encode(x)
-                if args.lambda_align > 0:
-                    align_loss = mse_loss(z_spnn, vae_latent)
+            # Moment matching: match per-channel mean and variance
+            if args.lambda_moment > 0:
+                moment_loss = (
+                    F.mse_loss(z_spnn.mean([0, 2, 3]), vae_latent.mean([0, 2, 3]))
+                    + F.mse_loss(z_spnn.var([0, 2, 3]), vae_latent.var([0, 2, 3]))
+                )
 
-                # Adversarial: train D then compute G loss
-                if use_adv:
-                    # (a) Discriminator step
-                    disc_optimizer.zero_grad()
-                    d_real = disc(vae_latent.detach())
-                    d_fake = disc(z_spnn.detach())
-                    d_loss = (F.relu(1.0 - d_real).mean()
-                              + F.relu(1.0 + d_fake).mean())
-                    d_loss.backward()
-                    disc_optimizer.step()
+            # Adversarial: train D then compute G loss
+            if use_adv:
+                # (a) Discriminator step
+                disc_optimizer.zero_grad()
+                d_real = disc(vae_latent.detach())
+                d_fake = disc(z_spnn.detach())
+                d_loss = (F.relu(1.0 - d_real).mean()
+                          + F.relu(1.0 + d_fake).mean())
+                d_loss.backward()
+                disc_optimizer.step()
 
-                    # (b) Generator loss for encoder
-                    g_loss = -disc(z_spnn).mean()
+                # (b) Generator loss for encoder
+                g_loss = -disc(z_spnn).mean()
 
             loss = (decoder_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
                     + args.lambda_align * align_loss
+                    + args.lambda_moment * moment_loss
                     + args.lambda_adv * g_loss)
 
             optimizer.zero_grad()
-            loss.backward()
+            accelerator.backward(loss)
             if args.max_grad_norm > 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
+                grad_norm = accelerator.clip_grad_norm_(
                     spnn.parameters(), max_norm=args.max_grad_norm)
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
+                grad_norm = accelerator.clip_grad_norm_(
                     spnn.parameters(), max_norm=float('inf'))
             optimizer.step()
             scheduler.step()
 
             epoch_loss += loss.item()
 
-            log_dict = {
-                "train/loss": loss.item(),
-                "train/decoder_loss": decoder_loss.item(),
-                "train/lpips_loss": lpips_loss.item(),
-                "train/cycle_loss": cycle_loss.item(),
-                "train/roundtrip_loss": roundtrip_loss.item(),
-                "train/align_loss": align_loss.item(),
-                "train/lr": scheduler.get_last_lr()[0],
-                "train/grad_norm": grad_norm.item(),
-            }
-            if use_adv:
-                log_dict["train/d_loss"] = d_loss.item()
-                log_dict["train/g_loss"] = g_loss.item()
-            wandb.log(log_dict)
+            if is_main:
+                log_dict = {
+                    "train/loss": loss.item(),
+                    "train/decoder_loss": decoder_loss.item(),
+                    "train/lpips_loss": lpips_loss.item(),
+                    "train/cycle_loss": cycle_loss.item(),
+                    "train/roundtrip_loss": roundtrip_loss.item(),
+                    "train/align_loss": align_loss.item(),
+                    "train/moment_loss": moment_loss.item(),
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
+                }
+                if use_adv:
+                    log_dict["train/d_loss"] = d_loss.item()
+                    log_dict["train/g_loss"] = g_loss.item()
+                wandb.log(log_dict)
 
-            pbar.set_postfix({
-                "loss": f"{loss.item():.4f}",
-                "lr": f"{scheduler.get_last_lr()[0]:.2e}",
-            })
+                pbar.set_postfix({
+                    "loss": f"{loss.item():.4f}",
+                    "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                })
 
         avg_loss = epoch_loss / len(train_loader)
-        wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
-        print(f"  Epoch {epoch} — avg loss: {avg_loss:.6f}")
+        if is_main:
+            wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
+            print(f"  Epoch {epoch} — avg loss: {avg_loss:.6f}")
 
-        # ── Penrose diagnostics ──
-        if epoch % args.save_every == 0:
-            p_metrics = penrose_check(spnn, penrose_images, penrose_latent, DEVICE)
+        # ── Penrose diagnostics (rank 0 only) ──
+        if epoch % args.save_every == 0 and is_main:
+            unwrapped_spnn = accelerator.unwrap_model(spnn)
+            p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
             wandb.log({**p_metrics, "epoch": epoch})
             spnn.train()
 
             # Save comparison images
             with torch.no_grad():
-                sample_decoded = spnn.decode(penrose_latent[:4])
+                sample_decoded = unwrapped_spnn.decode(penrose_latent[:4])
                 _, vae_dec = get_vae_pairs(vae, penrose_images[:4])
             save_comparison(sample_decoded, vae_dec, penrose_images[:4],
                             epoch, 0, sample_dir)
 
-        # ── Save best model ──
+        # ── Save best model (rank 0 only, unwrapped state dict) ──
         if avg_loss < best_loss:
             best_loss = avg_loss
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": spnn.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "loss": avg_loss,
-                "stages": CIFAR10_STAGES,
-            }, ckpt_path)
-            print(f"  New best loss: {avg_loss:.6f} — saved: {ckpt_path}")
+            if is_main:
+                unwrapped_spnn = accelerator.unwrap_model(spnn)
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": unwrapped_spnn.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": avg_loss,
+                    "stages": CIFAR10_STAGES,
+                }, ckpt_path)
+                print(f"  New best loss: {avg_loss:.6f} — saved: {ckpt_path}")
 
-    print(f"\nTraining complete. Best loss: {best_loss:.6f}")
-    print(f"Best model: {ckpt_path}")
-    wandb.finish()
+    if is_main:
+        print(f"\nTraining complete. Best loss: {best_loss:.6f}")
+        print(f"Best model: {ckpt_path}")
+        wandb.finish()
 
 
 def parse_args():
@@ -422,6 +488,8 @@ def parse_args():
     p.add_argument("--lambda_cycle", type=float, default=1.0)
     p.add_argument("--lambda_roundtrip", type=float, default=1.0)
     p.add_argument("--lambda_align", type=float, default=0.1)
+    p.add_argument("--lambda_moment", type=float, default=0.0,
+                   help="Moment matching weight (match per-channel mean+var)")
     p.add_argument("--lambda_adv", type=float, default=0.0,
                    help="Adversarial latent matching weight (0=disabled)")
     p.add_argument("--lr_disc", type=float, default=1e-4,
@@ -430,6 +498,8 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=5)
     p.add_argument("--penrose_batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--resume", type=str, default=None,
+                   help="Path to pretrained SPNN checkpoint to fine-tune from")
     p.add_argument("--output_dir", type=str,
                    default="cifar10_experiment/checkpoints")
     return p.parse_args()
