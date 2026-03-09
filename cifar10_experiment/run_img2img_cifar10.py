@@ -64,6 +64,19 @@ class SPNNCodec:
         return self.spnn.decode(z)
 
 
+class HybridCodec:
+    """VAE encoder + SPNN decoder."""
+    def __init__(self, vae, spnn):
+        self.vae = vae
+        self.spnn = spnn
+
+    def encode(self, x):
+        return self.vae.encode(x).mode()
+
+    def decode(self, z):
+        return self.spnn.decode(z)
+
+
 # ═══════════════════════════════════════════════════════════
 # Model loading
 # ═══════════════════════════════════════════════════════════
@@ -181,10 +194,19 @@ def to_display(t):
 def run(args):
     ldm, vae, spnn = load_models(args)
 
-    codecs = {
-        "VAE": SimpleVAECodec(vae),
-        "SPNN": SPNNCodec(spnn),
+    # Separate encoders and decoders
+    encoders = {
+        "VAE": lambda x: vae.encode(x).mode(),
+        "SPNN": lambda x: spnn.encode(x),
     }
+    decoders = {
+        "VAE": lambda z: vae.decode(z),
+        "SPNN": lambda z: spnn.decode(z),
+    }
+
+    # All encoder→decoder combinations
+    pipelines = [(enc_name, dec_name)
+                 for enc_name in encoders for dec_name in decoders]
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -222,61 +244,58 @@ def run(args):
                            f"noise{args.noise_strength}")
     os.makedirs(out_dir, exist_ok=True)
 
-    all_metrics = {name: {"psnr": [], "mse": []} for name in codecs}
+    pipe_names = [f"{e}→{d}" for e, d in pipelines]
+    all_metrics = {name: {"psnr": [], "mse": []} for name in pipe_names}
 
     for idx in range(images.shape[0]):
         x_gt = images[idx:idx + 1]
         class_label = labels_list[idx]
 
-        for codec_name, codec in codecs.items():
-            # 1. Encode
-            z_0 = codec.encode(x_gt)
+        # Pre-encode with each encoder once (shared across decoders)
+        encoded = {}
+        for enc_name, enc_fn in encoders.items():
+            encoded[enc_name] = enc_fn(x_gt)
 
-            # 2. Add noise
-            eps = torch.randn_like(z_0)
-            z_t = alpha_bar_t.sqrt() * z_0 + (1 - alpha_bar_t).sqrt() * eps
+        # Pre-denoise each encoded latent once (shared across decoders)
+        denoised = {}
+        for enc_name in encoders:
+            torch.manual_seed(args.seed + idx)
+            eps = torch.randn_like(encoded[enc_name])
+            z_t = (alpha_bar_t.sqrt() * encoded[enc_name]
+                   + (1 - alpha_bar_t).sqrt() * eps)
+            denoised[enc_name] = ddim_denoise(
+                ldm, z_t, class_label, start_tau,
+                guidance_scale=args.guidance_scale)
 
-            # 3. Denoise
-            z_clean = ddim_denoise(ldm, z_t, class_label, start_tau,
-                                   guidance_scale=args.guidance_scale)
-
-            # 4. Decode
-            x_recon = codec.decode(z_clean).clamp(-1, 1)
+        # Decode with each decoder and compute metrics
+        grid_imgs = [to_display(x_gt[0])]
+        for enc_name, dec_name in pipelines:
+            pipe_name = f"{enc_name}→{dec_name}"
+            x_recon = decoders[dec_name](denoised[enc_name]).clamp(-1, 1)
 
             p = psnr(x_recon, x_gt)
             m = F.mse_loss(x_recon, x_gt).item()
-            all_metrics[codec_name]["psnr"].append(p)
-            all_metrics[codec_name]["mse"].append(m)
+            all_metrics[pipe_name]["psnr"].append(p)
+            all_metrics[pipe_name]["mse"].append(m)
             print(f"  Image {idx+1}/{images.shape[0]} class={class_label} "
-                  f"codec={codec_name}: PSNR={p:.2f} dB, MSE={m:.6f}")
+                  f"{pipe_name}: PSNR={p:.2f} dB, MSE={m:.6f}")
 
-        # Save grid: Original | VAE result | SPNN result
-        grid_imgs = [to_display(x_gt[0])]
-        for codec_name, codec in codecs.items():
-            z_0 = codec.encode(x_gt)
-            eps = torch.randn_like(z_0)
-            # Use same seed for fair comparison
-            torch.manual_seed(args.seed + idx)
-            eps = torch.randn_like(z_0)
-            z_t = alpha_bar_t.sqrt() * z_0 + (1 - alpha_bar_t).sqrt() * eps
-            z_clean = ddim_denoise(ldm, z_t, class_label, start_tau,
-                                   guidance_scale=args.guidance_scale)
-            x_recon = codec.decode(z_clean).clamp(-1, 1)
             grid_imgs.append(to_display(x_recon[0]))
 
+        # Save grid: Original | VAE→VAE | VAE→SPNN | SPNN→VAE | SPNN→SPNN
         grid = torch.stack(grid_imgs)
         save_image(grid, os.path.join(out_dir, f"img{idx:03d}_class{class_label}.png"),
-                   nrow=3, padding=2)
+                   nrow=len(pipelines) + 1, padding=2)
 
     # Summary
     print(f"\n{'='*50}")
     print(f"img2img Summary (noise_strength={args.noise_strength})")
     print(f"{'='*50}")
-    for codec_name in codecs:
-        vals = all_metrics[codec_name]
+    for pipe_name in pipe_names:
+        vals = all_metrics[pipe_name]
         avg_psnr = sum(vals["psnr"]) / len(vals["psnr"])
         avg_mse = sum(vals["mse"]) / len(vals["mse"])
-        print(f"  {codec_name:>5s}: avg PSNR = {avg_psnr:.2f} dB, avg MSE = {avg_mse:.6f}")
+        print(f"  {pipe_name:>10s}: avg PSNR = {avg_psnr:.2f} dB, avg MSE = {avg_mse:.6f}")
 
     print(f"\nResults saved to {out_dir}/")
 
