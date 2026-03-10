@@ -227,7 +227,7 @@ def train(args):
         print(f"Device: {device}  |  Num processes: {accelerator.num_processes}")
 
     # Build run name from loss lambdas
-    run_name = (f"dec1_lp{args.lambda_lpips}_cy{args.lambda_cycle}"
+    run_name = (f"dec{args.lambda_decoder}_lp{args.lambda_lpips}_cy{args.lambda_cycle}"
                 f"_rt{args.lambda_roundtrip}_al{args.lambda_align}"
                 f"_mm{args.lambda_moment}_adv{args.lambda_adv}_h{args.hidden}")
     args.output_dir = os.path.join(args.output_dir, run_name)
@@ -392,7 +392,7 @@ def train(args):
                 # (b) Generator loss for encoder
                 g_loss = -disc(z_spnn).mean()
 
-            loss = (decoder_loss
+            loss = (args.lambda_decoder * decoder_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
@@ -484,6 +484,8 @@ def parse_args():
     p.add_argument("--mix_type", type=str, default="cayley",
                    choices=["cayley", "householder"])
     p.add_argument("--scale_bound", type=float, default=2.0)
+    p.add_argument("--lambda_decoder", type=float, default=1.0,
+                   help="Decoder MSE loss weight")
     p.add_argument("--lambda_lpips", type=float, default=0.1)
     p.add_argument("--lambda_cycle", type=float, default=1.0)
     p.add_argument("--lambda_roundtrip", type=float, default=1.0)
@@ -494,7 +496,7 @@ def parse_args():
                    help="Adversarial latent matching weight (0=disabled)")
     p.add_argument("--lr_disc", type=float, default=1e-4,
                    help="Discriminator learning rate")
-    p.add_argument("--max_grad_norm", type=float, default=1.0)
+    p.add_argument("--max_grad_norm", type=float, default=5.0)
     p.add_argument("--save_every", type=int, default=5)
     p.add_argument("--penrose_batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
