@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="Max gradient norm for clipping (0 to disable)")
     parser.add_argument("--save_every", type=int, default=1)
-    parser.add_argument("--penrose_batch_size", type=int, default=64)
+    parser.add_argument("--penrose_batch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="checkpoints_lpips")
@@ -105,7 +105,7 @@ def run_latent_diagnostics(args):
 
     # Load SPNN
     print(f"Loading SPNN from {args.checkpoint}...")
-    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, scale_bound=args.scale_bound)
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden * 2, scale_bound=args.scale_bound)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)
     if "model_state_dict" in state:
         state = state["model_state_dict"]

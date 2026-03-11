@@ -116,25 +116,20 @@ def train(args):
             discriminator.parameters(), lr=args.lr * 10, betas=(0.9, 0.99), weight_decay=1e-5
         )
 
-    # ── Fixed test batch for Penrose checks (rank 0 only) ──
-    penrose_images = None
-    penrose_latent = None
+    # ── Test dataset for Penrose checks (rank 0 only) ──
+    penrose_test_dataset = None
     if is_main:
         if args.dataset == "laion":
-            test_dataset = LAIONAestheticDataset(
+            penrose_test_dataset = LAIONAestheticDataset(
                 data_dir=args.laion_dir, img_size=args.img_size,
                 split="test", n_test=args.n_test,
             )
         else:
-            test_dataset = CelebAHQDataset(
+            penrose_test_dataset = CelebAHQDataset(
                 img_size=args.img_size, split="test", n_test=args.n_test,
             )
-        test_loader = DataLoader(test_dataset, batch_size=args.penrose_batch_size, shuffle=False)
-        penrose_images = next(iter(test_loader)).to(device)
-        with torch.no_grad():
-            penrose_latent = vae.encode(penrose_images).latent_dist.mode()
-        del test_dataset, test_loader
-        print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
+        print(f"Penrose check: {len(penrose_test_dataset)} test images, "
+              f"sampling {args.penrose_batch_size} random each time")
 
     # ── Optimizer: trains ALL of s, t, r, mix ──
     optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -335,6 +330,14 @@ def train(args):
         # ── Penrose + roundtrip checks (rank 0 only) ──
         if epoch % args.save_every == 0 and is_main:
             unwrapped_spnn = accelerator.unwrap_model(spnn)
+            # Sample a fresh random batch each time
+            penrose_loader = DataLoader(
+                penrose_test_dataset, batch_size=args.penrose_batch_size,
+                shuffle=True, num_workers=0)
+            penrose_images = next(iter(penrose_loader)).to(device)
+            with torch.no_grad():
+                penrose_latent = vae.encode(penrose_images).latent_dist.mode()
+            del penrose_loader
             p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
             wandb.log({**p_metrics, "epoch": epoch})
