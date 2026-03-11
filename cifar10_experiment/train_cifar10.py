@@ -300,8 +300,34 @@ def train(args):
             d_params = sum(p.numel() for p in disc.parameters())
             print(f"Adversarial loss enabled: discriminator {d_params:,} params")
 
-    # ── Optimizer (created before prepare) ──
-    optimizer = torch.optim.AdamW(spnn.parameters(), lr=args.lr, weight_decay=1e-5)
+    # ── Freeze params if requested ──
+    if args.freeze:
+        from models import ConvPINNBlock
+        frozen, trainable = 0, 0
+        for block in spnn.blocks:
+            if isinstance(block, ConvPINNBlock):
+                if args.freeze == "r":
+                    # Freeze r, train s/t/mix
+                    for p in block.r.parameters():
+                        p.requires_grad = False
+                        frozen += p.numel()
+                    for name in ['s', 't', 'mix']:
+                        for p in getattr(block, name).parameters():
+                            trainable += p.numel()
+                elif args.freeze == "encoder":
+                    # Freeze s/t/mix, train r only
+                    for name in ['s', 't', 'mix']:
+                        for p in getattr(block, name).parameters():
+                            p.requires_grad = False
+                            frozen += p.numel()
+                    for p in block.r.parameters():
+                        trainable += p.numel()
+        if is_main:
+            print(f"Freeze mode '{args.freeze}': frozen={frozen:,}, trainable={trainable:,}")
+
+    # ── Optimizer (only trainable params) ──
+    trainable_params = [p for p in spnn.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-5)
 
     # ── Accelerate prepare (wraps model with DDP, splits dataloader) ──
     spnn, optimizer, train_loader = accelerator.prepare(
@@ -500,6 +526,10 @@ def parse_args():
     p.add_argument("--save_every", type=int, default=5)
     p.add_argument("--penrose_batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--freeze", type=str, default=None,
+                   choices=["r", "encoder"],
+                   help="Freeze params: 'r' = freeze r networks (train s,t,mix), "
+                        "'encoder' = freeze s,t,mix (train r only)")
     p.add_argument("--resume", type=str, default=None,
                    help="Path to pretrained SPNN checkpoint to fine-tune from")
     p.add_argument("--output_dir", type=str,
