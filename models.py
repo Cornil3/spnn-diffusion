@@ -30,11 +30,12 @@ class Cayley1x1Conv(BaseOrthogonal1x1Conv):
 
     def _compute_W(self, device, dtype):
         C = self.channels
-        B = self.A_unconstrained.to(device=device, dtype=dtype)
+        # Always compute in fp32 — fp16 makes (I+A) singular for large A
+        B = self.A_unconstrained.to(device=device, dtype=torch.float32)
         A = B - B.t()
-        I = torch.eye(C, device=device, dtype=dtype)
+        I = torch.eye(C, device=device, dtype=torch.float32)
         W = torch.linalg.solve(I + A + self.eps * I, I - A)
-        return W
+        return W.to(dtype=dtype)
 
 
 class Householder1x1Conv(BaseOrthogonal1x1Conv):
