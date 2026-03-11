@@ -35,7 +35,7 @@ def get_vae_pairs(vae, images):
     These are the training targets for our SPNN decoder.
     """
     posterior = vae.encode(images).latent_dist
-    latent = posterior.mode()
+    latent = posterior.sample()
     decoded = vae.decode(latent).sample
     return latent, decoded
 
