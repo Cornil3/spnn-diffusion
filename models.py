@@ -320,6 +320,10 @@ class SPNNAutoencoder(nn.Module):
                           mix_type=mix_type, feat_size=32),
         ])
 
+    def forward(self, x):
+        """Forward pass = encode. Required for DDP wrapping."""
+        return self.encode(x)
+
     def encode(self, x):
         """Encode image -> latent."""
         for b in self.blocks:

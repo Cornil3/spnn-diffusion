@@ -140,16 +140,18 @@ if __name__ == "__main__":
         print("Specify --train and/or --test, or provide a valid --checkpoint for diagnostics")
         exit(1)
 
-    if args.train or args.test:
+    if args.train:
+        train(args)
+
+    # After accelerate launch, only rank 0 should run test/diagnostics
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank != 0:
+        exit(0)
+
+    if args.test:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity,
                    name=args.wandb_run_name, config=vars(args))
-
-        if args.train:
-            train(args)
-
-        if args.test:
-            run_test(args)
-
+        run_test(args)
         wandb.finish()
 
     # Latent space diagnostics — runs whenever a checkpoint exists
