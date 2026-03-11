@@ -28,10 +28,6 @@ def load_sd_vae():
 
 @torch.no_grad()
 def get_vae_pairs(vae, images):
-    """
-    Get (scaled_latent, decoded_image) pairs from the frozen SD-VAE.
-    Applies the crucial SD scaling factor so SPNN learns the correct distribution variance.
-    """
     posterior = vae.encode(images).latent_dist
     latent = posterior.mode()
 
@@ -157,9 +153,7 @@ def train(args):
             cos_loss = torch.tensor(0.0, device=DEVICE)
             if args.lambda_cos > 0:
                 with torch.no_grad():
-                    unscaled_z_vae = vae.encode(images).latent_dist.mode()
-                    # Ensure the target is scaled!
-                    z_vae = unscaled_z_vae * vae.config.scaling_factor
+                    z_vae = vae.encode(images).latent_dist.mode()
 
                 z_spnn = spnn.encode(images)
 
