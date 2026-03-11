@@ -33,6 +33,8 @@ def parse_args():
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--scale_bound", type=float, default=2.0)
 
+    parser.add_argument("--lambda_decoder", type=float, default=1.0,
+                        help="Weight of decoder MSE loss")
     parser.add_argument("--lambda_lpips", type=float, default=0.5,
                         help="Weight of LPIPS perceptual loss (0 to disable)")
     parser.add_argument("--lambda_cycle", type=float, default=0.3,

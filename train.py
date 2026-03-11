@@ -74,7 +74,7 @@ def train(args):
 
     # ── Models ──
     vae = load_sd_vae()
-    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, scale_bound=args.scale_bound).to(DEVICE)
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden * 2, scale_bound=args.scale_bound).to(DEVICE)
 
     total_params = sum(p.numel() for p in spnn.parameters())
     print(f"SPNN total params: {total_params:,}")
@@ -235,7 +235,7 @@ def train(args):
                 z_spnn = spnn.encode(images)
                 align_loss = mse_loss(z_spnn, z_vae)
 
-            loss = (decoder_loss
+            loss = (args.lambda_decoder * decoder_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
