@@ -117,7 +117,8 @@ def train(args):
         )
     test_loader = DataLoader(test_dataset, batch_size=args.penrose_batch_size, shuffle=False)
     penrose_images = next(iter(test_loader)).to(DEVICE)
-    penrose_latent, _ = get_vae_pairs(vae, penrose_images)
+    with torch.no_grad():
+        penrose_latent = vae.encode(penrose_images).latent_dist.mode()
     del test_dataset, test_loader
     print(f"Penrose check: using {penrose_images.size(0)} fixed test images")
 
@@ -127,6 +128,8 @@ def train(args):
         optimizer, T_max=args.num_epochs * len(loader), eta_min=1e-6
     )
     mse_loss = nn.MSELoss()
+    best_loss = float('inf')
+    best_ckpt_path = os.path.join(args.output_dir, "spnn_vae_best.pt")
 
     for epoch in range(1, args.num_epochs + 1):
         spnn.train()
@@ -276,6 +279,22 @@ def train(args):
         avg_loss = epoch_loss / len(loader)
         wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch})
         print(f"  Epoch {epoch} — avg decoder loss: {avg_loss:.6f}")
+
+        # ── Save best model ──
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            ckpt_dict = {
+                "epoch": epoch,
+                "model_state_dict": spnn.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": avg_loss,
+            }
+            if discriminator is not None:
+                ckpt_dict["discriminator_state_dict"] = discriminator.state_dict()
+                ckpt_dict["d_optimizer_state_dict"] = d_optimizer.state_dict()
+                ckpt_dict["d_scheduler_state_dict"] = d_scheduler.state_dict()
+            torch.save(ckpt_dict, best_ckpt_path)
+            print(f"  New best loss: {avg_loss:.6f} — saved: {best_ckpt_path}")
 
         # ── Penrose + roundtrip checks (diagnostic only) ──
         if epoch % args.save_every == 0:
