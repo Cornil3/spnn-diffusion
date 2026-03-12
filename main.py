@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="Max gradient norm for clipping (0 to disable)")
     parser.add_argument("--save_every", type=int, default=1)
-    parser.add_argument("--penrose_batch_size", type=int, default=512)
+    parser.add_argument("--penrose_batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="checkpoints_lpips")

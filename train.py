@@ -336,7 +336,13 @@ def train(args):
                 shuffle=True, num_workers=0)
             penrose_images = next(iter(penrose_loader)).to(device)
             with torch.no_grad():
-                penrose_latent = vae.encode(penrose_images).latent_dist.mode()
+                # Encode in chunks to avoid VAE OOM on large batches
+                chunk_size = 16
+                latent_chunks = []
+                for i in range(0, penrose_images.size(0), chunk_size):
+                    chunk = penrose_images[i:i+chunk_size]
+                    latent_chunks.append(vae.encode(chunk).latent_dist.mode())
+                penrose_latent = torch.cat(latent_chunks, dim=0)
             del penrose_loader
             p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
