@@ -52,7 +52,7 @@ def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sampl
 
 def train(args):
     # ── Accelerator (handles DDP, mixed precision, device placement) ──
-    accelerator = Accelerator(mixed_precision='fp16')
+    accelerator = Accelerator(mixed_precision='bf16')
     device = accelerator.device
     is_main = accelerator.is_main_process
 
@@ -84,7 +84,7 @@ def train(args):
     # ── Frozen models (not wrapped by accelerate — just move to device) ──
     vae = load_sd_vae(device, verbose=is_main)
     spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden,
-                           r_hidden=args.hidden * 2,
+                           r_hidden=args.hidden,
                            scale_bound=args.scale_bound).to(device)
 
     total_params = sum(p.numel() for p in spnn.parameters())
@@ -172,9 +172,14 @@ def train(args):
             # ── Encode through DDP (arms gradient sync reducer) ──
             z_spnn = spnn(images)
 
-            # ── Decoder loss: feed VAE latent, match VAE output ──
+            # ── Decoder distillation loss: feed VAE latent, match VAE output ──
             spnn_decoded = unwrapped.decode(vae_latent)
-            decoder_loss = mse_loss(spnn_decoded, vae_decoded)
+            decoder_distill_loss = mse_loss(spnn_decoded, vae_decoded)
+
+            # ── Decoder GT loss: feed VAE latent, match original image ──
+            decoder_gt_loss = torch.tensor(0.0, device=device)
+            if args.lambda_decoder_gt > 0:
+                decoder_gt_loss = mse_loss(spnn_decoded, images)
 
             # ── Seraena Phase A: Update discriminator with replay buffer ──
             d_loss = torch.tensor(0.0, device=device)
@@ -263,7 +268,8 @@ def train(args):
                     z_vae = vae.encode(images).latent_dist.mode()
                 align_loss = mse_loss(z_spnn, z_vae)
 
-            loss = (args.lambda_decoder * decoder_loss
+            loss = (args.lambda_decoder_distill * decoder_distill_loss
+                    + args.lambda_decoder_gt * decoder_gt_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
@@ -278,15 +284,21 @@ def train(args):
             else:
                 grad_norm = accelerator.clip_grad_norm_(
                     spnn.parameters(), max_norm=float('inf'))
-            optimizer.step()
-            scheduler.step()
+
+            # Skip optimizer step if loss or gradients are NaN
+            if torch.isfinite(loss) and torch.isfinite(torch.tensor(grad_norm)):
+                optimizer.step()
+                scheduler.step()
+            elif is_main:
+                print(f"  [!] Skipping step {batch_idx} — NaN detected (loss={loss.item()}, grad_norm={grad_norm})")
 
             epoch_loss += loss.item()
 
             if is_main:
                 log_dict = {
                     "train/loss": loss.item(),
-                    "train/decoder_loss": decoder_loss.item(),
+                    "train/decoder_distill_loss": decoder_distill_loss.item(),
+                    "train/decoder_gt_loss": decoder_gt_loss.item(),
                     "train/lpips_loss": lpips_loss.item(),
                     "train/cycle_loss": cycle_loss.item(),
                     "train/roundtrip_loss": roundtrip_loss.item(),
