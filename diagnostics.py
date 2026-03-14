@@ -74,7 +74,6 @@ def latent_alignment_check(spnn, vae, dataloader, device):
     Returns dict with MSE and cosine similarity metrics.
     """
     spnn.eval()
-    scaling = vae.config.scaling_factor
 
     total_mse = 0.0
     total_cos = 0.0
@@ -85,7 +84,7 @@ def latent_alignment_check(spnn, vae, dataloader, device):
         images = images.to(device)
 
         z_spnn = spnn.encode(images)
-        z_vae = vae.encode(images).latent_dist.mode() * scaling
+        z_vae = vae.encode(images).latent_dist.mode()
 
         bs = images.size(0)
         if num_el is None:
@@ -130,7 +129,6 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
 
     spnn.eval()
     os.makedirs(output_dir, exist_ok=True)
-    scaling = vae.config.scaling_factor
 
     def to_disp(t):
         return ((t.cpu() + 1) / 2).clamp(0, 1)
@@ -160,7 +158,7 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
             z_spnn = spnn.encode(x)
 
             # Cross-decode: VAE decodes SPNN's latent (unscale for VAE)
-            cross_recon = vae.decode(z_spnn / scaling).sample
+            cross_recon = vae.decode(z_spnn).sample
 
             # SPNN roundtrip
             spnn_recon = spnn.decode(z_spnn)
@@ -169,7 +167,7 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
             vae_mse = F.mse_loss(vae_recon, x).item()
             cross_mse = F.mse_loss(cross_recon, x).item()
             spnn_mse = F.mse_loss(spnn_recon, x).item()
-            z_mse = F.mse_loss(z_spnn, z_vae * scaling).item()
+            z_mse = F.mse_loss(z_spnn, z_vae).item()
             all_mse.append((vae_mse, cross_mse))
 
             print(f"  Image {count}: VAE recon MSE={vae_mse:.6f}  "
