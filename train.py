@@ -163,7 +163,8 @@ def train(args):
             # ── LPIPS perceptual loss ──
             lpips_loss = torch.tensor(0.0, device=device)
             if lpips_fn is not None:
-                lpips_loss = lpips_fn(spnn_decoded, vae_decoded).mean()
+                lpips_target = images if args.lambda_decoder_gt > 0 else vae_decoded
+                lpips_loss = lpips_fn(spnn_decoded, lpips_target).mean()
 
             # ── Cycle loss (surjectivity): encode(decode(z)) ≈ z ──
             cycle_loss = torch.tensor(0.0, device=device)
