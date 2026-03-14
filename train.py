@@ -1,7 +1,6 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from diffusers import AutoencoderKL
@@ -39,14 +38,18 @@ def get_vae_pairs(vae, images):
     decoded = vae.decode(latent).sample
     return latent, decoded
 
-def save_comparison(spnn_decoded, vae_decoded, original, epoch, batch_idx, sample_dir):
+def save_cycle_comparison(spnn, images, epoch, sample_dir, num_cycles=5):
+    """Save grid: row 0 = original, rows 1..num_cycles = after each encode→decode cycle."""
     from torchvision.utils import save_image
-    n = min(4, original.size(0))
-    orig = (original[:n].cpu() + 1) / 2
-    vae_r = (vae_decoded[:n].cpu() + 1) / 2
-    spnn_r = (spnn_decoded[:n].detach().cpu() + 1) / 2
-    grid = torch.cat([orig, vae_r, spnn_r], dim=0)
-    path = os.path.join(sample_dir, f"epoch{epoch:03d}_batch{batch_idx:04d}.png")
+    spnn.eval()
+    n = min(4, images.size(0))
+    x = images[:n]
+    rows = [(x.cpu() + 1) / 2]
+    for _ in range(num_cycles):
+        x = spnn.decode(spnn.encode(x))
+        rows.append((x.detach().cpu() + 1) / 2)
+    grid = torch.cat(rows, dim=0)
+    path = os.path.join(sample_dir, f"epoch{epoch:03d}_cycles.png")
     save_image(grid, path, nrow=n, padding=2)
 
 def train(args):
@@ -268,6 +271,12 @@ def train(args):
             p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
             wandb.log({**p_metrics, "epoch": epoch})
+
+            # Save cycle consistency grid (5 encode→decode cycles)
+            with torch.no_grad():
+                save_cycle_comparison(unwrapped_spnn, penrose_images, epoch,
+                                     train_sample_dir, num_cycles=5)
+
             spnn.train()
 
             ckpt_path = os.path.join(args.output_dir, f"spnn_vae_epoch{epoch:03d}.pt")
