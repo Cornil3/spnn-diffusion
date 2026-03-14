@@ -1,5 +1,4 @@
 import os
-import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +8,7 @@ from diffusers import AutoencoderKL
 import wandb
 import lpips
 from accelerate import Accelerator
-from models import SPNNAutoencoder, PatchDiscWithContext
+from models import SPNNAutoencoder
 from dataset import CelebAHQDataset, LAIONAestheticDataset
 from diagnostics import penrose_check, print_penrose_metrics
 
@@ -101,21 +100,6 @@ def train(args):
         if is_main:
             print("LPIPS loss enabled (VGG backbone)")
 
-    # ── Seraena-style conditional discriminator (not wrapped — stays on device) ──
-    discriminator = None
-    d_optimizer = None
-    d_scheduler = None
-    replay_buffer = []
-    max_buffer_len = 16384
-    if args.lambda_gan > 0:
-        discriminator = PatchDiscWithContext().to(device)
-        d_params = sum(p.numel() for p in discriminator.parameters())
-        if is_main:
-            print(f"Seraena PatchGAN discriminator enabled ({d_params:,} params)")
-        d_optimizer = torch.optim.AdamW(
-            discriminator.parameters(), lr=args.lr * 10, betas=(0.9, 0.99), weight_decay=1e-5
-        )
-
     # ── Test dataset for Penrose checks (rank 0 only) ──
     penrose_test_dataset = None
     if is_main:
@@ -141,11 +125,6 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_epochs * len(loader), eta_min=1e-6
     )
-    if discriminator is not None:
-        d_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            d_optimizer, T_max=args.num_epochs * len(loader), eta_min=1e-6
-        )
-
     mse_loss = nn.MSELoss()
     best_loss = float('inf')
     best_ckpt_path = os.path.join(args.output_dir, "spnn_vae_best.pt")
@@ -181,69 +160,6 @@ def train(args):
             if args.lambda_decoder_gt > 0:
                 decoder_gt_loss = mse_loss(spnn_decoded, images)
 
-            # ── Seraena Phase A: Update discriminator with replay buffer ──
-            d_loss = torch.tensor(0.0, device=device)
-            g_loss = torch.tensor(0.0, device=device)
-            if discriminator is not None:
-                fake_detached = spnn_decoded.detach()
-                ctx = vae_latent.detach()
-
-                # Update replay buffer on CPU (reservoir sampling)
-                for fi, ci in zip(fake_detached, ctx):
-                    if len(replay_buffer) >= max_buffer_len:
-                        i = random.randrange(0, len(replay_buffer))
-                        replay_buffer[i][0].copy_(fi.cpu())
-                        replay_buffer[i][1].copy_(ci.cpu())
-                    else:
-                        replay_buffer.append((fi.cpu().clone(), ci.cpu().clone()))
-
-                # Build disc batch: half current, half from buffer
-                n = len(fake_detached) // 2
-                if len(replay_buffer) >= n:
-                    buf_samples = [random.choice(replay_buffer) for _ in range(n)]
-                    buf_fake = torch.stack([s[0] for s in buf_samples]).to(device)
-                    buf_ctx = torch.stack([s[1] for s in buf_samples]).to(device)
-                    disc_fake = torch.cat([fake_detached[:n], buf_fake], 0)
-                    disc_ctx = torch.cat([ctx[:n], buf_ctx], 0)
-                else:
-                    disc_fake = fake_detached
-                    disc_ctx = ctx
-
-                # Expand real to match disc batch size
-                disc_real = vae_decoded[:disc_fake.size(0)].detach()
-                disc_real_ctx = ctx[:disc_fake.size(0)]
-
-                # LSGAN disc step: random real/fake mixing per sample
-                discriminator.train()
-                fake_mask = (torch.rand(disc_fake.size(0), 1, 1, 1, device=device) < 0.5)
-                in_ims = fake_mask.float() * disc_fake + (~fake_mask).float() * disc_real
-                in_ctx = fake_mask.float() * disc_ctx + (~fake_mask).float() * disc_real_ctx
-                scores = discriminator(in_ims, in_ctx)
-                targets = fake_mask.float().mul(2).sub(1).expand_as(scores)
-                d_loss = F.mse_loss(scores, targets)
-
-                d_optimizer.zero_grad()
-                d_loss.backward()
-                d_optimizer.step()
-                d_scheduler.step()
-
-                # Seraena Phase B: Compute correction targets for generator
-                discriminator.eval()
-                correction = torch.zeros_like(spnn_decoded).requires_grad_(True)
-                with torch.no_grad():
-                    ref_feats = discriminator(vae_decoded, vae_latent)
-                corr_feats = discriminator(spnn_decoded.detach() + correction, vae_latent)
-                feat_loss = F.mse_loss(
-                    ref_feats, corr_feats, reduction="none"
-                ).mean((1, 2, 3), keepdim=True)
-                feat_loss.sum().backward(inputs=[correction])
-                corr_grad = correction.grad.detach().neg()
-                corr_grad.div_(corr_grad.std() + 1e-5)
-                correction_target = (spnn_decoded.detach() + 0.1 * corr_grad).detach()
-
-                # Generator GAN loss: MSE toward correction target
-                g_loss = mse_loss(spnn_decoded, correction_target)
-
             # ── LPIPS perceptual loss ──
             lpips_loss = torch.tensor(0.0, device=device)
             if lpips_fn is not None:
@@ -273,7 +189,6 @@ def train(args):
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
-                    + args.lambda_gan * g_loss
                     + args.lambda_align * align_loss)
 
             optimizer.zero_grad()
@@ -306,9 +221,6 @@ def train(args):
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
                 }
-                if discriminator is not None:
-                    log_dict["train/d_loss"] = d_loss.item()
-                    log_dict["train/g_loss"] = g_loss.item()
                 wandb.log(log_dict)
 
                 pbar.set_postfix({
@@ -332,10 +244,6 @@ def train(args):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": avg_loss,
                 }
-                if discriminator is not None:
-                    ckpt_dict["discriminator_state_dict"] = discriminator.state_dict()
-                    ckpt_dict["d_optimizer_state_dict"] = d_optimizer.state_dict()
-                    ckpt_dict["d_scheduler_state_dict"] = d_scheduler.state_dict()
                 torch.save(ckpt_dict, best_ckpt_path)
                 print(f"  New best loss: {avg_loss:.6f} — saved: {best_ckpt_path}")
 
@@ -368,10 +276,6 @@ def train(args):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "loss": avg_loss,
             }
-            if discriminator is not None:
-                ckpt_dict["discriminator_state_dict"] = discriminator.state_dict()
-                ckpt_dict["d_optimizer_state_dict"] = d_optimizer.state_dict()
-                ckpt_dict["d_scheduler_state_dict"] = d_scheduler.state_dict()
             torch.save(ckpt_dict, ckpt_path)
             print(f"  Saved checkpoint: {ckpt_path}")
 
