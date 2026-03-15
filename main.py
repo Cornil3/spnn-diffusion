@@ -33,17 +33,17 @@ def parse_args():
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--scale_bound", type=float, default=2.0)
 
-    parser.add_argument("--lambda_decoder", type=float, default=1.0,
-                        help="Weight of decoder MSE loss")
+    parser.add_argument("--lambda_decoder_distill", type=float, default=1.0,
+                        help="Weight of decoder distillation loss (match VAE output)")
+    parser.add_argument("--lambda_decoder_gt", type=float, default=0.0,
+                        help="Weight of decoder GT loss (match original image)")
     parser.add_argument("--lambda_lpips", type=float, default=0.5,
                         help="Weight of LPIPS perceptual loss (0 to disable)")
     parser.add_argument("--lambda_cycle", type=float, default=0.3,
                         help="Weight of cycle/surjectivity loss (0 to disable)")
     parser.add_argument("--lambda_roundtrip", type=float, default=0.3,
                         help="Weight of roundtrip/pseudo-inverse stability loss (0 to disable)")
-    parser.add_argument("--lambda_gan", type=float, default=0.0,
-                        help="Weight of PatchGAN adversarial loss (0 to disable)")
-    parser.add_argument("--lambda_align", type=float, default=0.5,
+    parser.add_argument("--lambda_align", type=float, default=0.1,
                         help="Weight of latent alignment loss (0 to disable)")
 
     # ── Train args ──
@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="Max gradient norm for clipping (0 to disable)")
-    parser.add_argument("--save_every", type=int, default=1)
+    parser.add_argument("--save_every", type=int, default=50)
     parser.add_argument("--penrose_batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
@@ -74,8 +74,8 @@ def parse_args():
     mode = "+".join(filter(None, ["train" if args.train else None, "test" if args.test else None]))
     args.wandb_run_name = (
         f"{mode}_ep{args.num_epochs}_bs{args.batch_size}_lr{args.lr:.0e}"
-        f"_sb{args.scale_bound}_lpips{args.lambda_lpips}"
-        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}_gan{args.lambda_gan}_align{args.lambda_align}"
+        f"_sb{args.scale_bound}_distill{args.lambda_decoder_distill}_gt{args.lambda_decoder_gt}_lpips{args.lambda_lpips}"
+        f"_cyc{args.lambda_cycle}_rt{args.lambda_roundtrip}_align{args.lambda_align}"
         f"_h{args.hidden}_{os.path.basename(args.output_dir)}"
     )
 
@@ -105,7 +105,7 @@ def run_latent_diagnostics(args):
 
     # Load SPNN
     print(f"Loading SPNN from {args.checkpoint}...")
-    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden * 2, scale_bound=args.scale_bound)
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden, scale_bound=args.scale_bound)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)
     if "model_state_dict" in state:
         state = state["model_state_dict"]
