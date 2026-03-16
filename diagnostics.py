@@ -77,6 +77,11 @@ def latent_alignment_check(spnn, vae, dataloader, device):
 
     total_mse = 0.0
     total_cos = 0.0
+    total_sq_vae = 0.0
+    sum_vae = 0.0
+    sum_vae_sq = 0.0
+    sum_spnn = 0.0
+    sum_spnn_sq = 0.0
     n = 0
     num_el = None
 
@@ -95,20 +100,39 @@ def latent_alignment_check(spnn, vae, dataloader, device):
             z_spnn.view(bs, -1), z_vae.view(bs, -1), dim=1
         ).sum().item()
         total_cos += cos
+        total_sq_vae += (z_vae ** 2).sum().item()
+        sum_vae += z_vae.sum().item()
+        sum_vae_sq += (z_vae ** 2).sum().item()
+        sum_spnn += z_spnn.sum().item()
+        sum_spnn_sq += (z_spnn ** 2).sum().item()
         n += bs
 
+    mse = total_mse / (n * num_el)
+    mean_sq_vae = total_sq_vae / (n * num_el)
+    vae_mean = sum_vae / (n * num_el)
+    vae_var = sum_vae_sq / (n * num_el) - vae_mean ** 2
+    spnn_mean = sum_spnn / (n * num_el)
+    spnn_var = sum_spnn_sq / (n * num_el) - spnn_mean ** 2
+
     metrics = {
-        "latent_align/mse": total_mse / (n * num_el),
+        "latent_align/mse": mse,
+        "latent_align/relative_mse": mse / mean_sq_vae if mean_sq_vae > 0 else 0.0,
         "latent_align/cosine_sim": total_cos / n,
+        "latent_align/vae_mean": vae_mean,
+        "latent_align/vae_var": vae_var,
+        "latent_align/spnn_mean": spnn_mean,
+        "latent_align/spnn_var": spnn_var,
         "latent_align/num_samples": n,
     }
 
     print(f"\n{'='*50}")
     print(f"Latent Alignment Check ({n} samples)")
     print(f"{'='*50}")
-    print(f"  MSE(z_spnn, z_vae):    {metrics['latent_align/mse']:.6f}")
+    print(f"  MSE(z_spnn, z_vae):    {mse:.6f}")
+    print(f"  Relative MSE:          {metrics['latent_align/relative_mse']:.6f}  (MSE / mean(z_vae²))")
     print(f"  Cosine similarity:     {metrics['latent_align/cosine_sim']:.6f}")
-    print(f"  (cosine=1.0 means perfect alignment)")
+    print(f"  VAE  — mean: {vae_mean:.4f}, var: {vae_var:.4f}")
+    print(f"  SPNN — mean: {spnn_mean:.4f}, var: {spnn_var:.4f}")
 
     return metrics
 
