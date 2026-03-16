@@ -11,13 +11,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.utils import save_image
-from diffusers import StableDiffusionImg2ImgPipeline
-from tqdm import tqdm
+from diffusers import StableDiffusionImg2ImgPipeline, DDIMScheduler
 import wandb
 from models import SPNNAutoencoder
 from dataset import CelebAHQDataset
-from PIL import Image
-from torchvision.transforms import ToTensor
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -87,23 +84,23 @@ def main():
 
     sd_id = "runwayml/stable-diffusion-v1-5"
 
-    # VAE pipeline
+    # VAE pipeline (use DDIM scheduler for deterministic, stable results)
     pipe_vae = StableDiffusionImg2ImgPipeline.from_pretrained(
         sd_id, torch_dtype=torch.float32, safety_checker=None,
     ).to(DEVICE)
+    pipe_vae.scheduler = DDIMScheduler.from_config(pipe_vae.scheduler.config)
 
     # SPNN pipeline
     pipe_spnn = StableDiffusionImg2ImgPipeline.from_pretrained(
         sd_id, torch_dtype=torch.float32, safety_checker=None,
     ).to(DEVICE)
+    pipe_spnn.scheduler = DDIMScheduler.from_config(pipe_spnn.scheduler.config)
     spnn = SPNNAutoencoder(mix_type='cayley', hidden=256, r_hidden=256,
                            scale_bound=2.0).to(DEVICE)
     ckpt = torch.load(args.checkpoint, map_location=DEVICE)
     spnn.load_state_dict(ckpt.get("model_state_dict", ckpt))
     spnn.eval()
     pipe_spnn.vae = SPNNVAE(spnn, pipe_spnn.vae)
-
-    to_tensor = ToTensor()
 
     # Dataset
     test_dataset = CelebAHQDataset(img_size=512, split="test", n_test=1000)
@@ -121,14 +118,12 @@ def main():
 
     for img_idx in range(num_images):
         img_tensor = test_dataset[img_idx]  # [-1, 1]
-        init_image = Image.fromarray(
-            ((img_tensor.permute(1, 2, 0).numpy() + 1) / 2 * 255)
-            .clip(0, 255).astype(np.uint8)
-        )
-        original_tensor = to_tensor(init_image)  # [0, 1]
+        # Convert to [0, 1] tensor for pipeline input
+        original_tensor = (img_tensor + 1) / 2  # [0, 1]
 
-        curr_img_vae = init_image
-        curr_img_spnn = init_image
+        # Pipeline accepts tensors directly when using output_type="pt"
+        curr_vae_tensor = original_tensor.unsqueeze(0).to(DEVICE)  # [1, 3, H, W]
+        curr_spnn_tensor = original_tensor.unsqueeze(0).to(DEVICE)
         prev_vae_tensor = original_tensor
         prev_spnn_tensor = original_tensor
         vae_all_tensors = [original_tensor]
@@ -137,24 +132,26 @@ def main():
         for c in range(num_cycles):
             seed = 42 + c
 
-            curr_img_vae = pipe_vae(
+            curr_vae_tensor = pipe_vae(
                 prompt="",
-                image=curr_img_vae,
+                image=curr_vae_tensor,
                 strength=args.strength,
                 num_inference_steps=args.num_inference_steps,
                 generator=torch.Generator(device=DEVICE).manual_seed(seed),
-            ).images[0]
+                output_type="pt",
+            ).images  # [1, 3, H, W] in [0, 1]
 
-            curr_img_spnn = pipe_spnn(
+            curr_spnn_tensor = pipe_spnn(
                 prompt="",
-                image=curr_img_spnn,
+                image=curr_spnn_tensor,
                 strength=args.strength,
                 num_inference_steps=args.num_inference_steps,
                 generator=torch.Generator(device=DEVICE).manual_seed(seed),
-            ).images[0]
+                output_type="pt",
+            ).images  # [1, 3, H, W] in [0, 1]
 
-            vae_tensor_cur = to_tensor(curr_img_vae)
-            spnn_tensor_cur = to_tensor(curr_img_spnn)
+            vae_tensor_cur = curr_vae_tensor[0].cpu()
+            spnn_tensor_cur = curr_spnn_tensor[0].cpu()
 
             vae_psnr_t = calc_psnr(vae_tensor_cur, original_tensor)
             spnn_psnr_t = calc_psnr(spnn_tensor_cur, original_tensor)
