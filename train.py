@@ -131,13 +131,34 @@ def train(args):
     mse_loss = nn.MSELoss()
     best_loss = float('inf')
     best_ckpt_path = os.path.join(args.output_dir, "spnn_vae_best.pt")
+    start_epoch = 1
+
+    # ── Resume from checkpoint ──
+    if args.resume is not None:
+        if is_main:
+            print(f"Resuming from {args.resume}...")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=True)
+        unwrapped_spnn = accelerator.unwrap_model(spnn)
+        unwrapped_spnn.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "loss" in ckpt:
+            best_loss = ckpt["loss"]
+        if args.resume_epoch is None:
+            raise ValueError("--resume_epoch is required when using --resume")
+        start_epoch = args.resume_epoch + 1
+        # Advance scheduler to match resumed epoch
+        steps_done = (start_epoch - 1) * len(loader)
+        scheduler.last_epoch = steps_done
+        if is_main:
+            print(f"  Resumed at epoch {start_epoch}, best_loss={best_loss:.6f}")
 
     # ── WandB (rank 0 only) ──
     if is_main:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity,
                    name=args.wandb_run_name, config=vars(args))
 
-    for epoch in range(1, args.num_epochs + 1):
+    for epoch in range(start_epoch, args.num_epochs + 1):
         spnn.train()
         epoch_loss = 0.0
 
