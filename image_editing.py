@@ -39,7 +39,7 @@ class SPNNVAE(nn.Module):
 
         return DummyOutput(DummyDist())
 
-    def decode(self, z, return_dict=True):
+    def decode(self, z, return_dict=True, **kwargs):
         image = self.spnn.decode(z)
 
         if not return_dict:
@@ -66,8 +66,8 @@ def main():
     parser.add_argument("--num_cycles", type=int, default=10)
     parser.add_argument("--num_inference_steps", type=int, default=100)
     parser.add_argument("--checkpoint", type=str,
-                        default="checkpoints_celebahq/spnn_vae_epoch150.pt")
-    parser.add_argument("--num_save_grids", type=int, default=0,
+                        default="checkpoints_celebahq/spnn_vae_best.pt")
+    parser.add_argument("--num_save_grids", type=int, default=1,
                         help="Number of example grids to save")
     args = parser.parse_args()
 
@@ -118,6 +118,8 @@ def main():
         curr_img_spnn = init_image
         prev_vae_tensor = original_tensor
         prev_spnn_tensor = original_tensor
+        vae_all_tensors = [original_tensor]
+        spnn_all_tensors = [original_tensor]
 
         for c in range(num_cycles):
             prompt = ""
@@ -154,17 +156,25 @@ def main():
 
             prev_vae_tensor = vae_tensor_cur
             prev_spnn_tensor = spnn_tensor_cur
+            vae_all_tensors.append(vae_tensor_cur)
+            spnn_all_tensors.append(spnn_tensor_cur)
 
         n_done = img_idx + 1
         print(f"[{n_done}/{num_images}] "
               f"VAE total@10={vae_psnr_total_sum[-1]/n_done:.2f}dB  "
               f"SPNN total@10={spnn_psnr_total_sum[-1]/n_done:.2f}dB")
 
-        # Save example grids for the first few images
+        # Save full cycle grids for the first few images
+        # Top row: VAE (original + each cycle), Bottom row: SPNN (original + each cycle)
         if img_idx < args.num_save_grids:
-            # Re-run is wasteful; just save the last cycle's result
-            grid = torch.stack([original_tensor, vae_tensor_cur, spnn_tensor_cur])
-            save_image(grid, f"cycle_grid_img{img_idx:03d}.png", nrow=3, padding=2, pad_value=1.0)
+            vae_row = torch.stack(vae_all_tensors)
+            spnn_row = torch.stack(spnn_all_tensors)
+            grid = torch.cat([vae_row, spnn_row], dim=0)
+            grid_path = f"cycle_grid_img{img_idx:03d}.png"
+            save_image(grid, grid_path,
+                       nrow=num_cycles + 1, padding=2, pad_value=1.0)
+            wandb.log({f"cycle_grid_img{img_idx}": wandb.Image(
+                grid_path, caption=f"Top: VAE, Bottom: SPNN (img {img_idx})")})
 
     # Compute and log mean PSNR per cycle
     for c in range(num_cycles):
