@@ -56,6 +56,10 @@ def parse_args():
     parser.add_argument("--penrose_batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume training from")
+    parser.add_argument("--resume_epoch", type=int, default=None,
+                        help="Epoch to resume from (required with --resume)")
     parser.add_argument("--output_dir", type=str, default="checkpoints_lpips")
     parser.add_argument("--sample_dir", type=str, default="samples")
 
