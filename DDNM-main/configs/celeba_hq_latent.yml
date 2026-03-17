@@ -1,7 +1,7 @@
 data:
     dataset: "CelebA_HQ"
     category: ""
-    image_size: 256
+    image_size: 512
     channels: 3
     logit_transform: false
     uniform_dequantization: false
