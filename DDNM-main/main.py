@@ -84,8 +84,28 @@ def parse_args_and_config():
         "--add_noise",
         action="store_true"
     )
-
-    
+    parser.add_argument(
+        "--codec_type", type=str, default=None,
+        choices=["vae", "spnn"],
+        help="Override codec type from config (for latent DDNM mode)"
+    )
+    parser.add_argument(
+        "--spnn_checkpoint", type=str, default=None,
+        help="Override SPNN checkpoint path from config"
+    )
+    parser.add_argument(
+        "--prompt", type=str, default="",
+        help="Text prompt for guided latent diffusion (e.g. 'a photo of a woman')"
+    )
+    parser.add_argument(
+        "--bp_every", type=int, default=1,
+        help="Apply back-projection every N diffusion steps (default: 1 = every step)"
+    )
+    parser.add_argument(
+        "--bp_schedule", type=str, default="",
+        help="BP frequency schedule as comma-separated values per phase, e.g. '1,2,5,10' "
+             "(divides steps into equal phases, each with its own BP frequency)"
+    )
 
     args = parser.parse_args()
 
@@ -93,6 +113,12 @@ def parse_args_and_config():
     with open(os.path.join("configs", args.config), "r") as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
+
+    # Apply CLI overrides for codec settings
+    if args.codec_type is not None and hasattr(new_config, 'codec'):
+        new_config.codec.type = args.codec_type
+    if args.spnn_checkpoint is not None and hasattr(new_config, 'codec'):
+        new_config.codec.spnn_checkpoint = args.spnn_checkpoint
 
     level = getattr(logging, args.verbose.upper(), None)
     if not isinstance(level, int):
