@@ -113,6 +113,17 @@ class Diffusion(object):
             self.logvar = posterior_variance.clamp(min=1e-20).log()
 
     def sample(self, simplified):
+        # Latent SD 1.5 mode — bypass pixel-space model loading entirely
+        if hasattr(self.config.model, 'type') and self.config.model.type == 'latent_sd15':
+            print('Run Latent DDNM (SD 1.5 UNet + codec).',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'travel_length = {self.config.time_travel.travel_length},',
+                  f'travel_repeat = {self.config.time_travel.travel_repeat}.',
+                  f'Task: {self.args.deg}.'
+                  )
+            self.latent_ddnm()
+            return
+
         cls_fn = None
         if self.config.model.type == 'simple':
             model = Model(self.config)
@@ -208,8 +219,13 @@ class Diffusion(object):
             self.svd_based_ddnm_plus(model, cls_fn)
             
             
-    def simplified_ddnm_plus(self, model, cls_fn):
+    def simplified_ddnm_plus(self, model, cls_fn, codec_name=None):
         args, config = self.args, self.config
+
+        # Check if running in latent mode (codec set by latent_ddnm)
+        codec = getattr(self, '_codec', None)
+        latent_shape = getattr(self, '_latent_shape', None)
+        is_latent = codec is not None
 
         dataset, test_dataset = get_dataset(args, config)
 
@@ -240,8 +256,9 @@ class Diffusion(object):
             generator=g,
         )
 
-        # get degradation operator
+        # get degradation operator (always in pixel space)
         print("args.deg:",args.deg)
+        img_size = config.data.image_size
         if args.deg =='colorization':
             A = lambda z: color2gray(z)
             Ap = lambda z: gray2color(z)
@@ -250,49 +267,62 @@ class Diffusion(object):
             Ap = A
         elif args.deg =='sr_averagepooling':
             scale=round(args.deg_scale)
-            A = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
+            A = torch.nn.AdaptiveAvgPool2d((img_size//scale,img_size//scale))
             Ap = lambda z: MeanUpsample(z,scale)
         elif args.deg =='inpainting':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
+            if mask.shape[-1] != img_size:
+                mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(0).unsqueeze(0).float(),
+                    size=(img_size, img_size), mode='nearest'
+                ).squeeze(0).squeeze(0).to(mask.dtype)
             A = lambda z: z*mask
             Ap = A
         elif args.deg =='mask_color_sr':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
+            if mask.shape[-1] != img_size:
+                mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(0).unsqueeze(0).float(),
+                    size=(img_size, img_size), mode='nearest'
+                ).squeeze(0).squeeze(0).to(mask.dtype)
             A1 = lambda z: z*mask
             A1p = A1
-            
+
             A2 = lambda z: color2gray(z)
             A2p = lambda z: gray2color(z)
-            
+
             scale=round(args.deg_scale)
-            A3 = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
+            A3 = torch.nn.AdaptiveAvgPool2d((img_size//scale,img_size//scale))
             A3p = lambda z: MeanUpsample(z,scale)
-            
+
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
         elif args.deg =='diy':
-            # design your own degradation
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
+            if mask.shape[-1] != img_size:
+                mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(0).unsqueeze(0).float(),
+                    size=(img_size, img_size), mode='nearest'
+                ).squeeze(0).squeeze(0).to(mask.dtype)
             A1 = lambda z: z*mask
             A1p = A1
-            
+
             A2 = lambda z: color2gray(z)
             A2p = lambda z: gray2color(z)
-            
+
             scale=args.deg_scale
-            A3 = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
+            A3 = torch.nn.AdaptiveAvgPool2d((img_size//scale,img_size//scale))
             A3p = lambda z: MeanUpsample(z,scale)
-            
+
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
         else:
             raise NotImplementedError("degradation type not supported")
 
-        args.sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
-        sigma_y = args.sigma_y
+        sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -310,50 +340,76 @@ class Diffusion(object):
 
             Apy = Ap(y)
 
-            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
+            # Save degraded and original images
+            save_subfolder = f"Apy_{codec_name}" if codec_name else "Apy"
+            os.makedirs(os.path.join(self.args.image_folder, save_subfolder), exist_ok=True)
             for i in range(len(Apy)):
                 tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"{save_subfolder}/Apy_{idx_so_far + i}.png")
                 )
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"{save_subfolder}/orig_{idx_so_far + i}.png")
                 )
-                
-            # init x_T
-            x = torch.randn(
-                y.shape[0],
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
+
+            # init noise — latent shape for latent mode, pixel shape for pixel mode
+            if is_latent:
+                x = torch.randn(
+                    y.shape[0], latent_shape[0], latent_shape[1], latent_shape[2],
+                    device=self.device,
+                )
+            else:
+                x = torch.randn(
+                    y.shape[0], config.data.channels, img_size, img_size,
+                    device=self.device,
+                )
 
             with torch.no_grad():
                 skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
                 n = x.size(0)
                 x0_preds = []
                 xs = [x]
-                
-                times = get_schedule_jump(config.time_travel.T_sampling, 
-                                               config.time_travel.travel_length, 
+
+                times = get_schedule_jump(config.time_travel.T_sampling,
+                                               config.time_travel.travel_length,
                                                config.time_travel.travel_repeat,
                                               )
                 time_pairs = list(zip(times[:-1], times[1:]))
-                
-                
+
+
                 # reverse diffusion sampling
+                # Build BP schedule: more frequent at start (high noise), less at end
+                # bp_schedule is a string like "1,1,1,2,2,5,5,10,10,20" (per phase)
+                # or use bp_every for uniform spacing
+                total_steps = config.time_travel.T_sampling
+                bp_schedule_str = getattr(args, 'bp_schedule', '')
+                if bp_schedule_str:
+                    # Parse schedule: divide steps into equal phases,
+                    # each phase has its own bp frequency
+                    freqs = [int(x) for x in bp_schedule_str.split(',')]
+                    n_phases = len(freqs)
+                    steps_per_phase = total_steps // n_phases
+                    bp_freq_per_step = []
+                    for phase_idx, freq in enumerate(freqs):
+                        count = steps_per_phase if phase_idx < n_phases - 1 else total_steps - phase_idx * steps_per_phase
+                        bp_freq_per_step.extend([freq] * count)
+                    print(f"BP schedule: {n_phases} phases, freqs={freqs}")
+                else:
+                    bp_every = getattr(args, 'bp_every', 1)
+                    bp_freq_per_step = [bp_every] * total_steps
+                step_count = 0
                 for i, j in tqdm.tqdm(time_pairs):
                     i, j = i*skip, j*skip
-                    if j<0: j=-1 
+                    if j<0: j=-1
 
-                    if j < i: # normal sampling 
+                    if j < i: # normal sampling
+                        step_count += 1
                         t = (torch.ones(n) * i).to(x.device)
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
-                        sigma_t = (1 - at_next**2).sqrt()
+                        sigma_t = (1 - at / at_next).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -361,30 +417,38 @@ class Diffusion(object):
                         if et.size(1) == 6:
                             et = et[:, :3]
 
-                        # Eq. 12
+                        # Tweedie: estimate clean sample
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        # Eq. 19
-                        if sigma_t >= at_next*sigma_y:
-                            lambda_t = 1.
-                            gamma_t = (sigma_t**2 - (at_next*sigma_y)**2).sqrt()
+                        lambda_t = 1.
+                        if is_latent:
+                            freq = bp_freq_per_step[min(step_count - 1, len(bp_freq_per_step) - 1)]
+                            do_bp = (step_count % freq == 0)
+                            if not do_bp:
+                                x0_t_hat = x0_t
+                            else:
+                                x0_t_pixel = codec.decode(x0_t)
+                                x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
+                                x0_t_hat = codec.encode(x0_t_hat_pixel)
                         else:
-                            lambda_t = (sigma_t)/(at_next*sigma_y)
-                            gamma_t = 0.
+                            x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
 
-                        # Eq. 17
-                        x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
+                        # Standard DDIM step
+                        c2 = (1 - at_next - sigma_t ** 2).clamp(min=0).sqrt()
+                        xt_next = at_next.sqrt() * x0_t_hat + c2 * et + sigma_t * torch.randn_like(x0_t)
 
-                        eta = self.args.eta
+                        # Debug: save x0 estimate at a few timesteps
+                        if is_latent and i in [900, 700, 500, 300, 100, 10]:
+                            with torch.no_grad():
+                                dbg = codec.decode(x0_t).clamp(-1, 1)
+                                dbg = inverse_data_transform(config, dbg)
+                                save_subfolder = f"debug_{codec_name}" if codec_name else "debug"
+                                os.makedirs(os.path.join(self.args.image_folder, save_subfolder), exist_ok=True)
+                                tvu.save_image(dbg[0], os.path.join(
+                                    self.args.image_folder, save_subfolder, f"x0_t_{idx_so_far}_t{i}.png"))
 
-                        c1 = (1 - at_next).sqrt() * eta
-                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
-
-                        # different from the paper, we use DDIM here instead of DDPM
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
-
-                        x0_preds.append(x0_t.to('cpu'))
-                        xs.append(xt_next.to('cpu'))    
+                        x0_preds.append(x0_t_hat.to('cpu'))
+                        xs.append(xt_next.to('cpu'))
                     else: # time-travel back
                         next_t = (torch.ones(n) * j).to(x.device)
                         at_next = compute_alpha(self.betas, next_t.long())
@@ -395,16 +459,25 @@ class Diffusion(object):
                         xs.append(xt_next.to('cpu'))
 
                 x = xs[-1]
-                
-            x = [inverse_data_transform(config, xi) for xi in x]
 
-            tvu.save_image(
-                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
-            )
-            orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0].to(self.device) - orig) ** 2)
-            psnr = 10 * torch.log10(1 / mse)
-            avg_psnr += psnr
+            # Final output: decode to pixel space if latent mode
+            if is_latent:
+                with torch.no_grad():
+                    x = codec.decode(x.to(self.device)).clamp(-1, 1)
+            x = [inverse_data_transform(config, x)]
+
+            save_folder = codec_name if codec_name else ""
+            if save_folder:
+                os.makedirs(os.path.join(self.args.image_folder, save_folder), exist_ok=True)
+
+            for jj in range(x[0].size(0)):
+                save_path = os.path.join(self.args.image_folder, save_folder, f"{idx_so_far + jj}.png") if save_folder \
+                    else os.path.join(self.args.image_folder, f"{idx_so_far + jj}_{0}.png")
+                tvu.save_image(x[0][jj], save_path)
+                orig = inverse_data_transform(config, x_orig[jj])
+                mse = torch.mean((x[0][jj].to(self.device) - orig) ** 2)
+                psnr = 10 * torch.log10(1 / mse)
+                avg_psnr += psnr
 
             idx_so_far += y.shape[0]
 
@@ -521,8 +594,7 @@ class Diffusion(object):
                                    self.config.data.image_size, self.device)
         else:
             raise ValueError("degradation type not supported")
-        args.sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
-        sigma_y = args.sigma_y
+        sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -609,7 +681,84 @@ class Diffusion(object):
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
-# Code form RePaint   
+    def latent_ddnm(self):
+        """Load SD 1.5 UNet + codecs, then reuse simplified_ddnm_plus for sampling."""
+        args, config = self.args, self.config
+
+        from diffusers import UNet2DConditionModel
+        from transformers import CLIPTextModel, CLIPTokenizer
+        from functions.codec import load_codec
+
+        sd_id = "runwayml/stable-diffusion-v1-5"
+
+        # Load SD 1.5 UNet
+        print("Loading SD 1.5 UNet...")
+        unet = UNet2DConditionModel.from_pretrained(sd_id, subfolder="unet")
+        unet.eval().to(self.device)
+        for p in unet.parameters():
+            p.requires_grad = False
+
+        # Text embeddings for CFG
+        print("Loading text encoder...")
+        tokenizer = CLIPTokenizer.from_pretrained(sd_id, subfolder="tokenizer")
+        text_encoder = CLIPTextModel.from_pretrained(sd_id, subfolder="text_encoder")
+        text_encoder.eval().to(self.device)
+
+        # Unconditional embedding (empty string "")
+        uncond_tokens = tokenizer("", padding="max_length", max_length=77,
+                                  return_tensors="pt").input_ids.to(self.device)
+        with torch.no_grad():
+            uncond_emb = text_encoder(uncond_tokens).last_hidden_state  # [1, 77, 768]
+
+        # Conditional embedding (text prompt if provided)
+        prompt = getattr(args, 'prompt', '') or ''
+        if prompt:
+            print(f"Using prompt: '{prompt}'")
+        cond_tokens = tokenizer(prompt if prompt else "", padding="max_length", max_length=77,
+                                return_tensors="pt").input_ids.to(self.device)
+        with torch.no_grad():
+            cond_emb = text_encoder(cond_tokens).last_hidden_state
+        del text_encoder, tokenizer
+
+        # Load codec(s)
+        vae_codec, spnn_codec = load_codec(config, self.device)
+        guidance_scale = config.model.guidance_scale if hasattr(config.model, 'guidance_scale') else 1.0
+
+        # Wrap UNet to match pixel-space model(xt, t) interface
+        def make_latent_model(guidance_scale, uncond_emb, cond_emb):
+            def model_fn(zt, t):
+                uc = uncond_emb.expand(zt.size(0), -1, -1)
+                if guidance_scale > 1.0:
+                    cc = cond_emb.expand(zt.size(0), -1, -1)
+                    z_in = torch.cat([zt, zt], dim=0)
+                    t_in = t.repeat(2) if t.dim() > 0 else t.unsqueeze(0).repeat(2 * zt.size(0))
+                    e_in = torch.cat([uc, cc], dim=0)
+                    noise_all = unet(z_in, t_in, encoder_hidden_states=e_in).sample
+                    noise_uncond, noise_cond = noise_all.chunk(2)
+                    return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+                else:
+                    return unet(zt, t, encoder_hidden_states=uc).sample
+            return model_fn
+
+        model_fn = make_latent_model(guidance_scale, uncond_emb, cond_emb)
+
+        # Run for each codec
+        codecs_to_run = {"VAE": vae_codec}
+        if spnn_codec is not None:
+            codecs_to_run["SPNN"] = spnn_codec
+
+        for codec_name, codec in codecs_to_run.items():
+            print(f"\n--- Running with {codec_name} codec ---")
+            # Store codec on self so simplified_ddnm_plus can use it
+            self._codec = codec
+            self._latent_shape = (4, config.data.image_size // 8, config.data.image_size // 8)
+            self.simplified_ddnm_plus(model_fn, cls_fn=None, codec_name=codec_name)
+
+        self._codec = None
+        self._latent_shape = None
+
+
+# Code form RePaint
 def get_schedule_jump(T_sampling, travel_length, travel_repeat):
     jumps = {}
     for j in range(0, T_sampling - travel_length, travel_length):
