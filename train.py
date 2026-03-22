@@ -136,22 +136,27 @@ def train(args):
     # ── Resume from checkpoint ──
     if args.resume is not None:
         if is_main:
-            print(f"Resuming from {args.resume}...")
+            print(f"{'Finetuning' if args.finetune else 'Resuming'} from {args.resume}...")
         ckpt = torch.load(args.resume, map_location=device, weights_only=True)
         unwrapped_spnn = accelerator.unwrap_model(spnn)
         unwrapped_spnn.load_state_dict(ckpt["model_state_dict"])
-        if "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "loss" in ckpt:
-            best_loss = ckpt["loss"]
-        if args.resume_epoch is None:
-            raise ValueError("--resume_epoch is required when using --resume")
-        start_epoch = args.resume_epoch + 1
-        # Advance scheduler to match resumed epoch
-        steps_done = (start_epoch - 1) * len(loader)
-        scheduler.last_epoch = steps_done
-        if is_main:
-            print(f"  Resumed at epoch {start_epoch}, best_loss={best_loss:.6f}")
+        if args.finetune:
+            # Finetune mode: only load model weights, fresh optimizer/scheduler/epoch
+            if is_main:
+                print(f"  Finetune mode: fresh optimizer (lr={args.lr}), starting from epoch 1")
+        else:
+            if "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            if "loss" in ckpt:
+                best_loss = ckpt["loss"]
+            if args.resume_epoch is None:
+                raise ValueError("--resume_epoch is required when using --resume")
+            start_epoch = args.resume_epoch + 1
+            # Advance scheduler to match resumed epoch
+            steps_done = (start_epoch - 1) * len(loader)
+            scheduler.last_epoch = steps_done
+            if is_main:
+                print(f"  Resumed at epoch {start_epoch}, best_loss={best_loss:.6f}")
 
     # ── WandB (rank 0 only) ──
     if is_main:
@@ -289,6 +294,7 @@ def train(args):
                     latent_chunks.append(vae.encode(chunk).latent_dist.mode())
                 penrose_latent = torch.cat(latent_chunks, dim=0)
             del penrose_loader
+            torch.cuda.empty_cache()
             p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
             wandb.log({**p_metrics, "epoch": epoch})
