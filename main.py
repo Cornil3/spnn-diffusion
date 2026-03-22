@@ -16,10 +16,13 @@ def parse_args():
 
     # ── Dataset ──
     parser.add_argument("--dataset", type=str, default="celebahq",
-                        choices=["celebahq", "laion"],
+                        choices=["celebahq", "laion", "lsun_churches"],
                         help="Dataset to use for training")
     parser.add_argument("--laion_dir", type=str, default=None,
                         help="Path to LAION img2dataset output dir (required if --dataset=laion)")
+    parser.add_argument("--lsun_dir", type=str, default=None,
+                        help="Path to local LSUN lmdb dir (optional for --dataset=lsun_churches, "
+                             "if omitted downloads from HuggingFace)")
 
     # ── Shared ──
     parser.add_argument("--img_size", type=int, default=256)

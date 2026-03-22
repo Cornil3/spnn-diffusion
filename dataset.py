@@ -50,6 +50,65 @@ class CelebAHQDataset(Dataset):
         return self.transform(img)
 
 
+class LSUNChurchesDataset(Dataset):
+    """
+    LSUN Churches dataset with reproducible train/test split.
+    Downloads from HuggingFace (tglcourse/lsun-church) or loads from local LSUN lmdb.
+    """
+    def __init__(self, img_size=256, max_images=None, split="all", n_test=1000,
+                 data_dir=None):
+        self.transform = transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5]*3, [0.5]*3),
+        ])
+
+        if data_dir is not None:
+            # Load from local LSUN lmdb format
+            from torchvision.datasets import LSUN
+            lsun_split = "train" if split in ("train", "all") else "val"
+            self.backend = "lsun"
+            self.lsun_ds = LSUN(root=data_dir, classes=[f'church_outdoor_{lsun_split}'])
+            indices = list(range(len(self.lsun_ds)))
+        else:
+            # Load from HuggingFace
+            from datasets import load_dataset
+            print("Loading tglcourse/lsun_church dataset from HuggingFace...")
+            self.backend = "hf"
+            self.hf_ds = load_dataset("tglcourse/lsun_church", split="train")
+            indices = list(range(len(self.hf_ds)))
+
+        if max_images is not None:
+            indices = indices[:min(max_images, len(indices))]
+
+        n = len(indices)
+        n_test = min(n_test, n)
+        n_train = n - n_test
+
+        if split == "train":
+            indices = indices[:n_train]
+        elif split == "test":
+            indices = indices[n_train:]
+
+        self.indices = indices
+        print(f"  LSUN Churches split: {split} — {len(self.indices)} images "
+              f"(total {n}, n_test={n_test})")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        real_idx = self.indices[idx]
+        if self.backend == "lsun":
+            img, _ = self.lsun_ds[real_idx]
+        else:
+            img = self.hf_ds[real_idx]["image"]
+        if not isinstance(img, Image.Image):
+            img = Image.open(img)
+        img = img.convert("RGB")
+        return self.transform(img)
+
+
 class LAIONAestheticDataset(Dataset):
     """
     LAION-Aesthetics v2 5+ dataset downloaded via img2dataset (webdataset format).
