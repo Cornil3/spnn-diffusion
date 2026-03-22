@@ -4,6 +4,7 @@ import time
 import glob
 
 import numpy as np
+from PIL import Image
 import tqdm
 import torch
 import torch.utils.data as data
@@ -398,6 +399,12 @@ class Diffusion(object):
                 else:
                     bp_every = getattr(args, 'bp_every', 1)
                     bp_freq_per_step = [bp_every] * total_steps
+                # Accumulate debug frames for GIF (first N images only)
+                max_debug_gifs = getattr(args, 'num_debug_gifs', 1)
+                save_debug = is_latent and (idx_so_far - idx_init) < max_debug_gifs
+                frames_x0_t = []
+                frames_x0_t_hat = []
+
                 step_count = 0
                 for i, j in tqdm.tqdm(time_pairs):
                     i, j = i*skip, j*skip
@@ -426,6 +433,7 @@ class Diffusion(object):
                             do_bp = (step_count % freq == 0)
                             if not do_bp:
                                 x0_t_hat = x0_t
+                                x0_t_hat_pixel = None
                             else:
                                 x0_t_pixel = codec.decode(x0_t)
                                 x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
@@ -437,15 +445,24 @@ class Diffusion(object):
                         c2 = (1 - at_next - sigma_t ** 2).clamp(min=0).sqrt()
                         xt_next = at_next.sqrt() * x0_t_hat + c2 * et + sigma_t * torch.randn_like(x0_t)
 
-                        # Debug: save x0 estimate at a few timesteps
-                        if is_latent and i in [900, 700, 500, 300, 100, 10]:
+                        # Collect debug frames for GIF
+                        if save_debug:
                             with torch.no_grad():
-                                dbg = codec.decode(x0_t).clamp(-1, 1)
-                                dbg = inverse_data_transform(config, dbg)
-                                save_subfolder = f"debug_{codec_name}" if codec_name else "debug"
-                                os.makedirs(os.path.join(self.args.image_folder, save_subfolder), exist_ok=True)
-                                tvu.save_image(dbg[0], os.path.join(
-                                    self.args.image_folder, save_subfolder, f"x0_t_{idx_so_far}_t{i}.png"))
+                                # x0_t frame (raw Tweedie)
+                                dbg_x0 = codec.decode(x0_t).clamp(-1, 1)
+                                dbg_x0 = inverse_data_transform(config, dbg_x0)
+                                frame_x0 = (dbg_x0[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                                frames_x0_t.append(frame_x0)
+
+                                # x0_t_hat frame (after BP)
+                                if is_latent and x0_t_hat_pixel is not None:
+                                    # Reuse already-decoded pixel from BP
+                                    dbg_hat = x0_t_hat_pixel.clamp(-1, 1)
+                                else:
+                                    dbg_hat = codec.decode(x0_t_hat).clamp(-1, 1)
+                                dbg_hat = inverse_data_transform(config, dbg_hat)
+                                frame_hat = (dbg_hat[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                                frames_x0_t_hat.append(frame_hat)
 
                         x0_preds.append(x0_t_hat.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -459,6 +476,32 @@ class Diffusion(object):
                         xs.append(xt_next.to('cpu'))
 
                 x = xs[-1]
+
+            # Save debug GIFs
+            if save_debug and frames_x0_t:
+                gif_dir = os.path.join(self.args.image_folder, f"debug_{codec_name}" if codec_name else "debug")
+                os.makedirs(gif_dir, exist_ok=True)
+
+                def _save_gif(frames, path, duration=500):
+                    pil_frames = [Image.fromarray(f) for f in frames]
+                    pil_frames[0].save(path, save_all=True, append_images=pil_frames[1:],
+                                       duration=duration, loop=0)
+
+                gif_x0_path = os.path.join(gif_dir, f"x0_t_{idx_so_far}.gif")
+                gif_hat_path = os.path.join(gif_dir, f"x0_t_hat_{idx_so_far}.gif")
+                _save_gif(frames_x0_t, gif_x0_path)
+                _save_gif(frames_x0_t_hat, gif_hat_path)
+                print(f"Saved debug GIFs: {gif_x0_path}, {gif_hat_path}")
+
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        wandb.log({
+                            f"{codec_name}/x0_t_gif_{idx_so_far}": wandb.Video(gif_x0_path, fps=10, format="gif"),
+                            f"{codec_name}/x0_t_hat_gif_{idx_so_far}": wandb.Video(gif_hat_path, fps=10, format="gif"),
+                        })
+                except ImportError:
+                    pass
 
             # Final output: decode to pixel space if latent mode
             if is_latent:
@@ -685,6 +728,7 @@ class Diffusion(object):
         """Load SD 1.5 UNet + codecs, then reuse simplified_ddnm_plus for sampling."""
         args, config = self.args, self.config
 
+        print("Importing diffusers/transformers...")
         from diffusers import UNet2DConditionModel
         from transformers import CLIPTextModel, CLIPTokenizer
         from functions.codec import load_codec
