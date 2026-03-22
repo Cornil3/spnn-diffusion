@@ -60,6 +60,8 @@ def parse_args():
                         help="Path to checkpoint to resume training from")
     parser.add_argument("--resume_epoch", type=int, default=None,
                         help="Epoch to resume from (required with --resume)")
+    parser.add_argument("--finetune", action="store_true",
+                        help="Finetune mode: load only model weights, reset optimizer/scheduler/epoch")
     parser.add_argument("--output_dir", type=str, default="checkpoints_lpips")
     parser.add_argument("--sample_dir", type=str, default="samples")
 
