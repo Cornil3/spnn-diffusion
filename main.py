@@ -96,7 +96,7 @@ def run_latent_diagnostics(args):
     from torch.utils.data import DataLoader
     from diffusers import AutoencoderKL
     from models import SPNNAutoencoder
-    from dataset import CelebAHQDataset, LAIONAestheticDataset
+    from dataset import CelebAHQDataset, LAIONAestheticDataset, LSUNChurchesDataset
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n{'='*50}")
@@ -126,6 +126,11 @@ def run_latent_diagnostics(args):
         test_dataset = LAIONAestheticDataset(
             data_dir=args.laion_dir, img_size=args.img_size,
             split="test", n_test=args.n_test,
+        )
+    elif args.dataset == "lsun_churches":
+        test_dataset = LSUNChurchesDataset(
+            img_size=args.img_size, split="test", n_test=args.n_test,
+            data_dir=getattr(args, 'lsun_dir', None),
         )
     else:
         test_dataset = CelebAHQDataset(

@@ -73,9 +73,9 @@ class LSUNChurchesDataset(Dataset):
         else:
             # Load from HuggingFace
             from datasets import load_dataset
-            print("Loading tglcourse/lsun_church dataset from HuggingFace...")
+            print("Loading tglcourse/lsun_church_train dataset from HuggingFace...")
             self.backend = "hf"
-            self.hf_ds = load_dataset("tglcourse/lsun_church", split="train")
+            self.hf_ds = load_dataset("tglcourse/lsun_church_train", split="train")
             indices = list(range(len(self.hf_ds)))
 
         if max_images is not None:

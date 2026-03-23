@@ -71,6 +71,12 @@ def train(args):
             data_dir=args.laion_dir, img_size=args.img_size,
             split="train", n_test=args.n_test, max_images=args.max_images,
         )
+    elif args.dataset == "lsun_churches":
+        dataset = LSUNChurchesDataset(
+            img_size=args.img_size, max_images=args.max_images,
+            split="train", n_test=args.n_test,
+            data_dir=getattr(args, 'lsun_dir', None),
+        )
     else:
         dataset = CelebAHQDataset(
             img_size=args.img_size, max_images=args.max_images,
@@ -110,6 +116,11 @@ def train(args):
             penrose_test_dataset = LAIONAestheticDataset(
                 data_dir=args.laion_dir, img_size=args.img_size,
                 split="test", n_test=args.n_test,
+            )
+        elif args.dataset == "lsun_churches":
+            penrose_test_dataset = LSUNChurchesDataset(
+                img_size=args.img_size, split="test", n_test=args.n_test,
+                data_dir=getattr(args, 'lsun_dir', None),
             )
         else:
             penrose_test_dataset = CelebAHQDataset(
