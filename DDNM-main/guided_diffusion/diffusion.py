@@ -428,9 +428,11 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         lambda_t = 1.
+                        bp_stop_pct = getattr(args, 'bp_stop', 1.0)
                         if is_latent:
                             freq = bp_freq_per_step[min(step_count - 1, len(bp_freq_per_step) - 1)]
-                            do_bp = (step_count % freq == 0)
+                            bp_past_stop = step_count > total_steps * bp_stop_pct
+                            do_bp = (step_count % freq == 0) and not bp_past_stop
                             if not do_bp:
                                 x0_t_hat = x0_t
                                 x0_t_hat_pixel = None
@@ -483,7 +485,7 @@ class Diffusion(object):
                 os.makedirs(gif_dir, exist_ok=True)
 
                 def _save_gif(frames, path, duration=500):
-                    pil_frames = [Image.fromarray(f) for f in frames]
+                    pil_frames = [Image.fromarray(f).resize((256, 256), Image.LANCZOS) for f in frames]
                     pil_frames[0].save(path, save_all=True, append_images=pil_frames[1:],
                                        duration=duration, loop=0)
 
