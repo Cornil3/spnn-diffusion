@@ -38,6 +38,6 @@ if __name__ == '__main__':
     ldm = LatentDiffusionModel(network, sampler, vae)
 
     # 3. Train
-    data_loader = DataGenerator().celebahq(batch_size=16, img_size=128)
+    data_loader = DataGenerator().celebahq(batch_size=64, img_size=128)
     trainer = Trainer(ldm, ldm.loss)
     trainer.train(dl=data_loader, epochs=100, file_name=LDM_SAVE_PATH, no_label=True)
