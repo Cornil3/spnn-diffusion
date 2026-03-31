@@ -32,25 +32,48 @@ def penrose_check(spnn, images, latents, device):
     x = images.to(device)
     z = latents.to(device)
 
-    # g = encode, g' = decode
-    gx = spnn.encode(x)                            # g(x)
-    gpgx = spnn.decode(gx)                          # g'(g(x))
-    ggpgx = spnn.encode(gpgx)                       # g(g'(g(x)))
+    # Process in chunks to avoid OOM on large images
+    chunk = 8
+    B = x.size(0)
+    sum_ggg = 0.0
+    sum_gpggp = 0.0
+    sum_ggp = 0.0
+    sum_rt = 0.0
+    n_pixels_x = 0
+    n_pixels_z = 0
 
-    gpz = spnn.decode(z)                             # g'(z)
-    ggpz = spnn.encode(gpz)                          # g(g'(z))
-    gpggpz = spnn.decode(ggpz)                       # g'(g(g'(z)))
+    for i in range(0, B, chunk):
+        xi = x[i:i+chunk]
+        zi = z[i:i+chunk]
 
-    # Roundtrip via r network
-    latent = spnn.encode(x)
-    roundtrip = spnn.decode(latent)
+        gx = spnn.encode(xi)
+        gpgx = spnn.decode(gx)
+        ggpgx = spnn.encode(gpgx)
 
-    mse = F.mse_loss
+        gpz = spnn.decode(zi)
+        ggpz = spnn.encode(gpz)
+        gpggpz = spnn.decode(ggpz)
+
+        latent = spnn.encode(xi)
+        roundtrip = spnn.decode(latent)
+
+        npx = xi.numel()
+        npz = zi.numel()
+        sum_ggg += F.mse_loss(ggpgx, gx, reduction="sum").item()
+        sum_gpggp += F.mse_loss(gpggpz, gpz, reduction="sum").item()
+        sum_ggp += F.mse_loss(ggpz, zi, reduction="sum").item()
+        sum_rt += F.mse_loss(roundtrip, xi, reduction="sum").item()
+        n_pixels_x += npx
+        n_pixels_z += npz
+
+        del gx, gpgx, ggpgx, gpz, ggpz, gpggpz, latent, roundtrip
+        torch.cuda.empty_cache()
+
     metrics = {
-        "penrose/ggg_eq_g":         mse(ggpgx, gx).item(),
-        "penrose/gpggp_eq_gp":      mse(gpggpz, gpz).item(),
-        "penrose/ggp_eq_id":        mse(ggpz, z).item(),
-        "penrose/roundtrip":        mse(roundtrip, x).item(),
+        "penrose/ggg_eq_g":         sum_ggg / n_pixels_z,
+        "penrose/gpggp_eq_gp":      sum_gpggp / n_pixels_x,
+        "penrose/ggp_eq_id":        sum_ggp / n_pixels_z,
+        "penrose/roundtrip":        sum_rt / n_pixels_x,
     }
     return metrics
 
