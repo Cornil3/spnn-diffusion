@@ -135,7 +135,7 @@ DEGRADATION_REGISTRY = {
 def load_models(args):
     """Load SD UNet, scheduler, text encoder, VAE, and SPNN."""
     sd_id = "runwayml/stable-diffusion-v1-5"
-    vae_id = "timbrooks/instruct-pix2pix"
+    vae_id = sd_id
 
     print("Loading UNet...")
     unet = UNet2DConditionModel.from_pretrained(sd_id, subfolder="unet")
@@ -168,7 +168,8 @@ def load_models(args):
 
     print(f"Loading SPNN from {args.checkpoint}...")
     spnn = SPNNAutoencoder(
-        mix_type=args.mix_type, hidden=args.hidden, scale_bound=args.scale_bound,
+        mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden,
+        scale_bound=args.scale_bound,
     )
     state = torch.load(args.checkpoint, map_location=DEVICE, weights_only=True)
     if "model_state_dict" in state:
@@ -196,14 +197,15 @@ class VAECodec:
 
 
 class SPNNCodec:
-    def __init__(self, spnn):
+    def __init__(self, spnn, scaling_factor):
         self.spnn = spnn
+        self.sf = scaling_factor
 
     def encode(self, x):
-        return self.spnn.encode(x)
+        return self.spnn.encode(x) * self.sf
 
     def decode(self, z):
-        return self.spnn.decode(z)
+        return self.spnn.decode(z / self.sf)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -212,20 +214,21 @@ class SPNNCodec:
 
 @torch.no_grad()
 def ddnm_sample(unet, scheduler, codec, degradation, y, empty_emb,
-                guidance_scale=2.0):
+                guidance_scale=2.0, img_size=256):
     """
     Latent DDNM: reverse diffusion with null-space projection at each step.
 
     Args:
         codec: object with .encode(x) and .decode(z)
         degradation: object with .A(x), .A_pinv(y), .null_space_project(x0, y)
-        y: degraded measurement in pixel space [B, 3, H, W]
+        y: degraded measurement in pixel space [B, 3, H', W'] (may be smaller than original)
         empty_emb: empty text embedding [1, 77, 768]
+        img_size: original image size (before degradation)
     Returns:
-        Reconstructed image in pixel space [B, 3, H, W]
+        Reconstructed image in pixel space [B, 3, img_size, img_size]
     """
     B = y.shape[0]
-    latent_shape = (B, 4, y.shape[2] // 8, y.shape[3] // 8)
+    latent_shape = (B, 4, img_size // 8, img_size // 8)
     emb = empty_emb.expand(B, -1, -1)
 
     # Start from pure noise
@@ -270,8 +273,9 @@ def ddnm_sample(unet, scheduler, codec, degradation, y, empty_emb,
 
         z_t = alpha_next.sqrt() * z_0_corrected + (1 - alpha_next).sqrt() * noise_pred
 
-    # Final decode
-    return codec.decode(z_t)
+    # Final result: use the last projected pixel-space image directly
+    # (avoids one extra unnecessary encode->decode round-trip)
+    return x_0_corrected
 
 
 # ═══════════════════════════════════════════════════════════
@@ -296,7 +300,7 @@ def run(args):
 
     codecs = {
         "VAE": VAECodec(vae),
-        "SPNN": SPNNCodec(spnn),
+        "SPNN": SPNNCodec(spnn, vae.config.scaling_factor),
     }
 
     # Load test images
@@ -330,6 +334,7 @@ def run(args):
                 x_recon = ddnm_sample(
                     unet, scheduler, codec, degradation, y, empty_emb,
                     guidance_scale=args.guidance_scale,
+                    img_size=args.img_size,
                 )
                 # Clamp to valid range
                 x_recon = x_recon.clamp(-1, 1)
@@ -378,15 +383,15 @@ def parse_args():
                         help="Inverse problems to run")
     parser.add_argument("--num_images", type=int, default=5,
                         help="Number of test images")
-    parser.add_argument("--num_steps", type=int, default=50,
+    parser.add_argument("--num_steps", type=int, default=200,
                         help="DDIM steps")
-    parser.add_argument("--guidance_scale", type=float, default=2.0,
+    parser.add_argument("--guidance_scale", type=float, default=1.0,
                         help="Classifier-free guidance scale")
-    parser.add_argument("--img_size", type=int, default=256)
+    parser.add_argument("--img_size", type=int, default=512)
     # Model args (must match checkpoint)
     parser.add_argument("--mix_type", type=str, default="cayley",
                         choices=["cayley", "householder"])
-    parser.add_argument("--hidden", type=int, default=128)
+    parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--scale_bound", type=float, default=2.0)
     return parser.parse_args()
 
