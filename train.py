@@ -8,7 +8,7 @@ import wandb
 import lpips
 from accelerate import Accelerator
 from models import SPNNAutoencoder
-from dataset import CelebAHQDataset, LAIONAestheticDataset
+from dataset import CelebAHQDataset, LAIONAestheticDataset, LSUNChurchesDataset
 from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -17,9 +17,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def load_sd_vae(device, verbose=True):
     """Load frozen SD-VAE to given device."""
     if verbose:
-        print("Loading VAE from timbrooks/instruct-pix2pix...")
+        print("Loading VAE from runwayml/stable-diffusion-v1-5...")
     vae = AutoencoderKL.from_pretrained(
-        "timbrooks/instruct-pix2pix", subfolder="vae"
+        "runwayml/stable-diffusion-v1-5", subfolder="vae"
     )
     vae.eval()
     for p in vae.parameters():
@@ -331,7 +331,13 @@ def train(args):
     if is_main:
         unwrapped_spnn = accelerator.unwrap_model(spnn)
         final_path = os.path.join(args.output_dir, "spnn_vae_final.pt")
-        torch.save(unwrapped_spnn.state_dict(), final_path)
+        final_dict = {
+            "epoch": args.num_epochs,
+            "model_state_dict": unwrapped_spnn.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": best_loss,
+        }
+        torch.save(final_dict, final_path)
         print(f"\nTraining complete. Final model: {final_path}")
         print(f"The encoder (spnn.encode / forward) now works automatically —")
         print(f"it uses the same s, t, mix that were trained through the decoder.")
