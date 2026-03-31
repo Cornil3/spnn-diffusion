@@ -17,7 +17,7 @@ model:
     guidance_scale: 1.0
 
 codec:
-    type: "vae"
+    type: "spnn"
     spnn_checkpoint: ""
     spnn_mix_type: "cayley"
     spnn_hidden: 256

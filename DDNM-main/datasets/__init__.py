@@ -163,6 +163,42 @@ def get_dataset(args, config):
             )
             test_dataset = Subset(dataset, test_indices)
 
+    elif config.data.dataset == "LSUN_Churches":
+        # Load LSUN Churches test images from a folder or HuggingFace
+        churches_path = os.path.join(args.exp, "datasets", "lsun_churches")
+        if os.path.exists(churches_path):
+            # Load from local ImageFolder (expects subdirectory structure)
+            dataset = torchvision.datasets.ImageFolder(
+                churches_path,
+                transform=transforms.Compose([
+                    transforms.Resize(config.data.image_size),
+                    transforms.CenterCrop(config.data.image_size),
+                    transforms.ToTensor(),
+                ])
+            )
+            test_dataset = dataset
+        else:
+            # Auto-download from HuggingFace and cache as ImageFolder
+            print(f"LSUN Churches folder not found at {churches_path}, downloading from HuggingFace...")
+            from datasets import load_dataset as hf_load_dataset
+            hf_ds = hf_load_dataset("tglcourse/lsun_church_train", split="train")
+            n_test = min(100, len(hf_ds))
+            # Take last n_test as test set (same convention as our SPNN training)
+            os.makedirs(os.path.join(churches_path, "images"), exist_ok=True)
+            for i in range(len(hf_ds) - n_test, len(hf_ds)):
+                img = hf_ds[i]["image"]
+                img.save(os.path.join(churches_path, "images", f"{i:06d}.png"))
+            print(f"Saved {n_test} test images to {churches_path}/images/")
+            dataset = torchvision.datasets.ImageFolder(
+                churches_path,
+                transform=transforms.Compose([
+                    transforms.Resize(config.data.image_size),
+                    transforms.CenterCrop(config.data.image_size),
+                    transforms.ToTensor(),
+                ])
+            )
+            test_dataset = dataset
+
     elif config.data.dataset == 'ImageNet':
         # only use validation dataset here
         

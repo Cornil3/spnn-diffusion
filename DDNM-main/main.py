@@ -106,6 +106,10 @@ def parse_args_and_config():
         help="BP frequency schedule as comma-separated values per phase, e.g. '1,2,5,10' "
              "(divides steps into equal phases, each with its own BP frequency)"
     )
+    parser.add_argument(
+        "--bp_stop", type=float, default=1.0,
+        help="Stop BP after this fraction of steps (e.g. 0.5 = BP only in first half)"
+    )
 
     args = parser.parse_args()
 
