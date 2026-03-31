@@ -125,6 +125,15 @@ class Diffusion(object):
             self.latent_ddnm()
             return
 
+        # CompVis unconditional LDM mode (e.g. LSUN Churches)
+        if hasattr(self.config.model, 'type') and self.config.model.type == 'latent_compvis_ldm':
+            print('Run Latent DDNM (CompVis unconditional UNet + codec).',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'Task: {self.args.deg}.'
+                  )
+            self.latent_compvis_ldm()
+            return
+
         cls_fn = None
         if self.config.model.type == 'simple':
             model = Model(self.config)
@@ -799,6 +808,45 @@ class Diffusion(object):
             self._codec = codec
             self._latent_shape = (4, config.data.image_size // 8, config.data.image_size // 8)
             self.simplified_ddnm_plus(model_fn, cls_fn=None, codec_name=codec_name)
+
+        self._codec = None
+        self._latent_shape = None
+
+    def latent_compvis_ldm(self):
+        """Load CompVis unconditional UNet directly from .ckpt + codecs for DDNM."""
+        args, config = self.args, self.config
+
+        from functions.codec import load_codec
+        from functions.compvis_unet import load_compvis_unet
+
+        # Load unconditional UNet directly from CompVis checkpoint
+        ckpt_path = config.model.compvis_ckpt_path
+        unet = load_compvis_unet(ckpt_path, self.device)
+
+        # Load codec(s) — scaling factor override handled in load_codec
+        vae_codec, spnn_codec = load_codec(config, self.device)
+
+        # Simple wrapper — unconditional, no CFG, no text embeddings
+        def model_fn(zt, t):
+            # CompVis UNet expects t as integer tensor
+            if not torch.is_tensor(t):
+                t = torch.tensor([t], device=zt.device).long()
+            if t.dim() == 0:
+                t = t.unsqueeze(0).expand(zt.size(0))
+            return unet(zt, t)
+
+        # Run for each codec
+        codecs_to_run = {"VAE": vae_codec}
+        if spnn_codec is not None:
+            codecs_to_run["SPNN"] = spnn_codec
+
+        for codec_name, codec in codecs_to_run.items():
+            print(f"\n--- Running with {codec_name} codec ---")
+            self._codec = codec
+            self._latent_shape = (4, config.data.image_size // 8,
+                                  config.data.image_size // 8)
+            self.simplified_ddnm_plus(model_fn, cls_fn=None,
+                                      codec_name=codec_name)
 
         self._codec = None
         self._latent_shape = None
