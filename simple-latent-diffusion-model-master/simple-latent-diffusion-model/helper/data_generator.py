@@ -123,6 +123,14 @@ class DataGenerator():
         return DataLoader(dataset, batch_size=batch_size, shuffle=True,
                           num_workers=self.num_workers, pin_memory=self.pin_memory)
 
+    def celebahq(self, batch_size: int = 16, img_size: int = 128):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+        from dataset import CelebAHQDataset
+        dataset = CelebAHQDataset(img_size=img_size, split="train", n_test=1000)
+        return DataLoader(dataset, batch_size, shuffle=True,
+                          num_workers=self.num_workers, pin_memory=self.pin_memory)
+
     def random_data(self, size, batch_size : int = 4):
         train_data = torch.randn(size)
         return DataLoader(train_data, batch_size)

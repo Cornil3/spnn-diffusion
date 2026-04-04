@@ -32,25 +32,48 @@ def penrose_check(spnn, images, latents, device):
     x = images.to(device)
     z = latents.to(device)
 
-    # g = encode, g' = decode
-    gx = spnn.encode(x)                            # g(x)
-    gpgx = spnn.decode(gx)                          # g'(g(x))
-    ggpgx = spnn.encode(gpgx)                       # g(g'(g(x)))
+    # Process in chunks to avoid OOM on large images
+    chunk = 8
+    B = x.size(0)
+    sum_ggg = 0.0
+    sum_gpggp = 0.0
+    sum_ggp = 0.0
+    sum_rt = 0.0
+    n_pixels_x = 0
+    n_pixels_z = 0
 
-    gpz = spnn.decode(z)                             # g'(z)
-    ggpz = spnn.encode(gpz)                          # g(g'(z))
-    gpggpz = spnn.decode(ggpz)                       # g'(g(g'(z)))
+    for i in range(0, B, chunk):
+        xi = x[i:i+chunk]
+        zi = z[i:i+chunk]
 
-    # Roundtrip via r network
-    latent = spnn.encode(x)
-    roundtrip = spnn.decode(latent)
+        gx = spnn.encode(xi)
+        gpgx = spnn.decode(gx)
+        ggpgx = spnn.encode(gpgx)
 
-    mse = F.mse_loss
+        gpz = spnn.decode(zi)
+        ggpz = spnn.encode(gpz)
+        gpggpz = spnn.decode(ggpz)
+
+        latent = spnn.encode(xi)
+        roundtrip = spnn.decode(latent)
+
+        npx = xi.numel()
+        npz = zi.numel()
+        sum_ggg += F.mse_loss(ggpgx, gx, reduction="sum").item()
+        sum_gpggp += F.mse_loss(gpggpz, gpz, reduction="sum").item()
+        sum_ggp += F.mse_loss(ggpz, zi, reduction="sum").item()
+        sum_rt += F.mse_loss(roundtrip, xi, reduction="sum").item()
+        n_pixels_x += npx
+        n_pixels_z += npz
+
+        del gx, gpgx, ggpgx, gpz, ggpz, gpggpz, latent, roundtrip
+        torch.cuda.empty_cache()
+
     metrics = {
-        "penrose/ggg_eq_g":         mse(ggpgx, gx).item(),
-        "penrose/gpggp_eq_gp":      mse(gpggpz, gpz).item(),
-        "penrose/ggp_eq_id":        mse(ggpz, z).item(),
-        "penrose/roundtrip":        mse(roundtrip, x).item(),
+        "penrose/ggg_eq_g":         sum_ggg / n_pixels_z,
+        "penrose/gpggp_eq_gp":      sum_gpggp / n_pixels_x,
+        "penrose/ggp_eq_id":        sum_ggp / n_pixels_z,
+        "penrose/roundtrip":        sum_rt / n_pixels_x,
     }
     return metrics
 
@@ -74,10 +97,14 @@ def latent_alignment_check(spnn, vae, dataloader, device):
     Returns dict with MSE and cosine similarity metrics.
     """
     spnn.eval()
-    scaling = vae.config.scaling_factor
 
     total_mse = 0.0
     total_cos = 0.0
+    total_sq_vae = 0.0
+    sum_vae = 0.0
+    sum_vae_sq = 0.0
+    sum_spnn = 0.0
+    sum_spnn_sq = 0.0
     n = 0
     num_el = None
 
@@ -85,7 +112,7 @@ def latent_alignment_check(spnn, vae, dataloader, device):
         images = images.to(device)
 
         z_spnn = spnn.encode(images)
-        z_vae = vae.encode(images).latent_dist.mode() * scaling
+        z_vae = vae.encode(images).latent_dist.mode()
 
         bs = images.size(0)
         if num_el is None:
@@ -96,20 +123,39 @@ def latent_alignment_check(spnn, vae, dataloader, device):
             z_spnn.view(bs, -1), z_vae.view(bs, -1), dim=1
         ).sum().item()
         total_cos += cos
+        total_sq_vae += (z_vae ** 2).sum().item()
+        sum_vae += z_vae.sum().item()
+        sum_vae_sq += (z_vae ** 2).sum().item()
+        sum_spnn += z_spnn.sum().item()
+        sum_spnn_sq += (z_spnn ** 2).sum().item()
         n += bs
 
+    mse = total_mse / (n * num_el)
+    mean_sq_vae = total_sq_vae / (n * num_el)
+    vae_mean = sum_vae / (n * num_el)
+    vae_var = sum_vae_sq / (n * num_el) - vae_mean ** 2
+    spnn_mean = sum_spnn / (n * num_el)
+    spnn_var = sum_spnn_sq / (n * num_el) - spnn_mean ** 2
+
     metrics = {
-        "latent_align/mse": total_mse / (n * num_el),
+        "latent_align/mse": mse,
+        "latent_align/relative_mse": mse / mean_sq_vae if mean_sq_vae > 0 else 0.0,
         "latent_align/cosine_sim": total_cos / n,
+        "latent_align/vae_mean": vae_mean,
+        "latent_align/vae_var": vae_var,
+        "latent_align/spnn_mean": spnn_mean,
+        "latent_align/spnn_var": spnn_var,
         "latent_align/num_samples": n,
     }
 
     print(f"\n{'='*50}")
     print(f"Latent Alignment Check ({n} samples)")
     print(f"{'='*50}")
-    print(f"  MSE(z_spnn, z_vae):    {metrics['latent_align/mse']:.6f}")
+    print(f"  MSE(z_spnn, z_vae):    {mse:.6f}")
+    print(f"  Relative MSE:          {metrics['latent_align/relative_mse']:.6f}  (MSE / mean(z_vae²))")
     print(f"  Cosine similarity:     {metrics['latent_align/cosine_sim']:.6f}")
-    print(f"  (cosine=1.0 means perfect alignment)")
+    print(f"  VAE  — mean: {vae_mean:.4f}, var: {vae_var:.4f}")
+    print(f"  SPNN — mean: {spnn_mean:.4f}, var: {spnn_var:.4f}")
 
     return metrics
 
@@ -130,7 +176,6 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
 
     spnn.eval()
     os.makedirs(output_dir, exist_ok=True)
-    scaling = vae.config.scaling_factor
 
     def to_disp(t):
         return ((t.cpu() + 1) / 2).clamp(0, 1)
@@ -160,7 +205,7 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
             z_spnn = spnn.encode(x)
 
             # Cross-decode: VAE decodes SPNN's latent (unscale for VAE)
-            cross_recon = vae.decode(z_spnn / scaling).sample
+            cross_recon = vae.decode(z_spnn).sample
 
             # SPNN roundtrip
             spnn_recon = spnn.decode(z_spnn)
@@ -169,7 +214,7 @@ def cross_decode_check(spnn, vae, dataloader, device, output_dir, num_images=5):
             vae_mse = F.mse_loss(vae_recon, x).item()
             cross_mse = F.mse_loss(cross_recon, x).item()
             spnn_mse = F.mse_loss(spnn_recon, x).item()
-            z_mse = F.mse_loss(z_spnn, z_vae * scaling).item()
+            z_mse = F.mse_loss(z_spnn, z_vae).item()
             all_mse.append((vae_mse, cross_mse))
 
             print(f"  Image {count}: VAE recon MSE={vae_mse:.6f}  "

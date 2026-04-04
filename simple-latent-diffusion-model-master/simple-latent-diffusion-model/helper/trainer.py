@@ -17,7 +17,7 @@ class Trainer():
                  best_loss = float("inf"),
                  accumulation_steps: int = 1,
                  max_grad_norm: float = 1.0):
-        self.accelerator = Accelerator(mixed_precision = 'fp16', gradient_accumulation_steps=accumulation_steps)
+        self.accelerator = Accelerator(mixed_precision = 'bf16', gradient_accumulation_steps=accumulation_steps)
         self.model = model.to(self.accelerator.device)
         if ema is None:
             self.ema = EMA(self.model).to(self.accelerator.device)            
