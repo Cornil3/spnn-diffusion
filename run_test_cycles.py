@@ -133,7 +133,6 @@ def run_test(args):
             grid = torch.cat([row_vae, row_spnn], dim=0)
             grid_path = os.path.join(test_sample_dir, f"test_cycles_{img_idx:03d}.png")
             save_image(grid, grid_path, nrow=args.num_cycles + 1, padding=4, pad_value=1.0)
-            wandb.log({"test/cycle_grids": wandb.Image(grid_path, caption=f"Image {img_idx} — Row1: VAE, Row2: SPNN (pinv)")})
 
             # ── Summary: original | VAE@last | SPNN@last ──
             summary = torch.cat([
@@ -143,7 +142,11 @@ def run_test(args):
             ], dim=0)
             summary_path = os.path.join(test_sample_dir, f"test_summary_{img_idx:03d}.png")
             save_image(summary, summary_path, nrow=3, padding=4, pad_value=1.0)
-            wandb.log({"test/summaries": wandb.Image(summary_path, caption=f"Image {img_idx} — Orig | VAE@{args.num_cycles} | SPNN@{args.num_cycles}")})
+
+            wandb.log({
+                "test/cycle_grids": wandb.Image(grid_path, caption=f"Image {img_idx} — Row1: VAE, Row2: SPNN (pinv)"),
+                "test/summaries": wandb.Image(summary_path, caption=f"Image {img_idx} — Orig | VAE@{args.num_cycles} | SPNN@{args.num_cycles}"),
+            })
 
     # ── Average Penrose metrics ──
     avg_penrose = {}
