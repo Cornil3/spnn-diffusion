@@ -8,7 +8,7 @@ from tqdm import tqdm
 from diffusers import AutoencoderKL
 import wandb
 from models import SPNNAutoencoder
-from dataset import CelebAHQDataset
+from dataset import CelebAHQDataset, LAIONAestheticDataset, LSUNChurchesDataset
 from diagnostics import penrose_check, print_penrose_metrics
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -83,9 +83,20 @@ def run_test(args):
     vae = load_sd_vae()
     spnn = load_spnn(args.checkpoint, args.mix_type, args.hidden, args.scale_bound)
 
-    dataset = CelebAHQDataset(
-        img_size=args.img_size, split="test", n_test=args.n_test,
-    )
+    if args.dataset == "laion":
+        dataset = LAIONAestheticDataset(
+            data_dir=args.laion_dir, img_size=args.img_size,
+            split="test", n_test=args.n_test,
+        )
+    elif args.dataset == "lsun_churches":
+        dataset = LSUNChurchesDataset(
+            img_size=args.img_size, split="test", n_test=args.n_test,
+            data_dir=getattr(args, 'lsun_dir', None),
+        )
+    else:
+        dataset = CelebAHQDataset(
+            img_size=args.img_size, split="test", n_test=args.n_test,
+        )
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
     print(f"Test set: {len(dataset)} images\n")
 

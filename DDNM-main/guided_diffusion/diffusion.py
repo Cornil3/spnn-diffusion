@@ -125,6 +125,15 @@ class Diffusion(object):
             self.latent_ddnm()
             return
 
+        # CompVis unconditional LDM mode (e.g. LSUN Churches)
+        if hasattr(self.config.model, 'type') and self.config.model.type == 'latent_compvis_ldm':
+            print('Run Latent DDNM (CompVis unconditional UNet + codec).',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'Task: {self.args.deg}.'
+                  )
+            self.latent_compvis_ldm()
+            return
+
         cls_fn = None
         if self.config.model.type == 'simple':
             model = Model(self.config)
@@ -428,9 +437,11 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         lambda_t = 1.
+                        bp_stop_pct = getattr(args, 'bp_stop', 1.0)
                         if is_latent:
                             freq = bp_freq_per_step[min(step_count - 1, len(bp_freq_per_step) - 1)]
-                            do_bp = (step_count % freq == 0)
+                            bp_past_stop = step_count > total_steps * bp_stop_pct
+                            do_bp = (step_count % freq == 0) and not bp_past_stop
                             if not do_bp:
                                 x0_t_hat = x0_t
                                 x0_t_hat_pixel = None
@@ -483,7 +494,7 @@ class Diffusion(object):
                 os.makedirs(gif_dir, exist_ok=True)
 
                 def _save_gif(frames, path, duration=500):
-                    pil_frames = [Image.fromarray(f) for f in frames]
+                    pil_frames = [Image.fromarray(f).resize((256, 256), Image.LANCZOS) for f in frames]
                     pil_frames[0].save(path, save_all=True, append_images=pil_frames[1:],
                                        duration=duration, loop=0)
 
@@ -797,6 +808,45 @@ class Diffusion(object):
             self._codec = codec
             self._latent_shape = (4, config.data.image_size // 8, config.data.image_size // 8)
             self.simplified_ddnm_plus(model_fn, cls_fn=None, codec_name=codec_name)
+
+        self._codec = None
+        self._latent_shape = None
+
+    def latent_compvis_ldm(self):
+        """Load CompVis unconditional UNet directly from .ckpt + codecs for DDNM."""
+        args, config = self.args, self.config
+
+        from functions.codec import load_codec
+        from functions.compvis_unet import load_compvis_unet
+
+        # Load unconditional UNet directly from CompVis checkpoint
+        ckpt_path = config.model.compvis_ckpt_path
+        unet = load_compvis_unet(ckpt_path, self.device)
+
+        # Load codec(s) — scaling factor override handled in load_codec
+        vae_codec, spnn_codec = load_codec(config, self.device)
+
+        # Simple wrapper — unconditional, no CFG, no text embeddings
+        def model_fn(zt, t):
+            # CompVis UNet expects t as integer tensor
+            if not torch.is_tensor(t):
+                t = torch.tensor([t], device=zt.device).long()
+            if t.dim() == 0:
+                t = t.unsqueeze(0).expand(zt.size(0))
+            return unet(zt, t)
+
+        # Run for each codec
+        codecs_to_run = {"VAE": vae_codec}
+        if spnn_codec is not None:
+            codecs_to_run["SPNN"] = spnn_codec
+
+        for codec_name, codec in codecs_to_run.items():
+            print(f"\n--- Running with {codec_name} codec ---")
+            self._codec = codec
+            self._latent_shape = (4, config.data.image_size // 8,
+                                  config.data.image_size // 8)
+            self.simplified_ddnm_plus(model_fn, cls_fn=None,
+                                      codec_name=codec_name)
 
         self._codec = None
         self._latent_shape = None

@@ -66,6 +66,7 @@ def load_spnn(ckpt_path, mix_type, hidden, scale_bound):
         stages=CIFAR10_STAGES,
         mix_type=mix_type,
         hidden=hidden,
+        r_hidden=hidden,
         scale_bound=scale_bound,
     )
     state = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
@@ -365,7 +366,7 @@ def parse_args():
                    default="cifar10_experiment/samples")
     # SPNN model args (must match checkpoint)
     p.add_argument("--mix_type", type=str, default="cayley")
-    p.add_argument("--hidden", type=int, default=64)
+    p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--scale_bound", type=float, default=2.0)
     p.add_argument("--diagnostics_only", action="store_true",
                    help="Run only latent alignment + cross-decode (no wandb)")

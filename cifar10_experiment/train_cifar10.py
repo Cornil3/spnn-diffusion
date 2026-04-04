@@ -88,7 +88,7 @@ class SPNNAutoencoderConfigurable(nn.Module):
         ('pinn', in_ch, out_ch, feat_size) -> ConvPINNBlock(in_ch, out_ch, ...)
     """
 
-    def __init__(self, stages, mix_type="cayley", hidden=64,
+    def __init__(self, stages, mix_type="cayley", hidden=64, r_hidden=64,
                  scale_bound=2.0):
         super().__init__()
         blocks = []
@@ -98,7 +98,7 @@ class SPNNAutoencoderConfigurable(nn.Module):
             elif stage[0] == 'pinn':
                 _, in_ch, out_ch, feat_size = stage
                 blocks.append(ConvPINNBlock(
-                    in_ch, out_ch, hidden=hidden,
+                    in_ch, out_ch, hidden=hidden, r_hidden=hidden,
                     scale_bound=scale_bound, mix_type=mix_type,
                     feat_size=feat_size,
                 ))

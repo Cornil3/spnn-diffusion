@@ -57,6 +57,12 @@ def load_codec(config, device):
 
     vae_codec = VAECodec(vae)
 
+    # Override scaling factor if CompVis LDM (different from SD 1.5's 0.18215)
+    sf_override = getattr(config.codec, 'compvis_scale_factor', None)
+    if sf_override is not None:
+        print(f"Overriding scaling factor: {vae_codec.sf} -> {sf_override}")
+        vae_codec.sf = sf_override
+
     codec_type = config.codec.type if hasattr(config, 'codec') else "vae"
 
     if codec_type == "spnn":
@@ -72,7 +78,8 @@ def load_codec(config, device):
             state = state["model_state_dict"]
         spnn.load_state_dict(state)
         spnn.eval().to(device)
-        spnn_codec = SPNNCodec(spnn, vae.config.scaling_factor)
+        scaling_factor = sf_override if sf_override is not None else vae.config.scaling_factor
+        spnn_codec = SPNNCodec(spnn, scaling_factor)
         return vae_codec, spnn_codec
     else:
         return vae_codec, None
