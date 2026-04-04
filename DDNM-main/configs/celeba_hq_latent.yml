@@ -18,7 +18,7 @@ model:
 
 codec:
     type: "spnn"
-    spnn_checkpoint: ""
+    spnn_checkpoint: "../checkpoints_celebahq_distill_512/spnn_vae_best_512.pt"
     spnn_mix_type: "cayley"
     spnn_hidden: 256
     spnn_scale_bound: 2.0
