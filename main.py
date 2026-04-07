@@ -67,6 +67,11 @@ def parse_args():
                         help="Finetune mode: load only model weights, reset optimizer/scheduler/epoch")
     parser.add_argument("--output_dir", type=str, default="checkpoints_lpips")
     parser.add_argument("--sample_dir", type=str, default="samples")
+    parser.add_argument("--compvis_ckpt", type=str, default=None,
+                        help="Path to CompVis LDM .ckpt — use its VAE instead of SD 1.5 "
+                             "(required for LSUN churches training)")
+    parser.add_argument("--compvis_model_config", type=str, default=None,
+                        help="Path to CompVis model YAML config (required with --compvis_ckpt)")
 
     # ── Test args ──
     parser.add_argument("--checkpoint", type=str, default=None,

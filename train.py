@@ -27,11 +27,85 @@ def load_sd_vae(device, verbose=True):
     return vae.to(device)
 
 
+def load_compvis_vae(ckpt_path, model_config_path, device, verbose=True):
+    """Load frozen CompVis KL-VAE from an LDM .ckpt file."""
+    from omegaconf import OmegaConf
+    from ldm.util import instantiate_from_config
+
+    if verbose:
+        print(f"Loading CompVis VAE from {ckpt_path}...")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    sd = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+
+    # Extract first_stage_model weights
+    vae_sd = {}
+    for k, v in sd.items():
+        if k.startswith("first_stage_model."):
+            vae_sd[k.replace("first_stage_model.", "")] = v
+
+    # Instantiate VAE from the model config YAML
+    model_cfg = OmegaConf.load(model_config_path)
+    vae_cfg = model_cfg.model.params.first_stage_config
+    if "ckpt_path" in vae_cfg.get("params", {}):
+        del vae_cfg.params.ckpt_path
+    vae = instantiate_from_config(vae_cfg)
+
+    missing, unexpected = vae.load_state_dict(vae_sd, strict=False)
+    if verbose:
+        if missing:
+            print(f"  Warning: {len(missing)} missing VAE keys")
+        if unexpected:
+            print(f"  Warning: {len(unexpected)} unexpected VAE keys")
+        if not missing and not unexpected:
+            print(f"  All {len(vae_sd)} VAE weights loaded successfully")
+
+    vae.eval().to(device)
+    for p in vae.parameters():
+        p.requires_grad = False
+    return vae
+
+
+class CompVisVAEWrapper:
+    """Wraps CompVis VAE to match the diffusers VAE API used in get_vae_pairs."""
+    def __init__(self, compvis_vae):
+        self.vae = compvis_vae
+
+    def encode(self, x):
+        posterior = self.vae.encode(x)
+        return _CompVisPosteriorWrapper(posterior)
+
+    def decode(self, z):
+        out = self.vae.decode(z)
+        return _CompVisDecodeWrapper(out)
+
+    def to(self, device):
+        self.vae.to(device)
+        return self
+
+    def parameters(self):
+        return self.vae.parameters()
+
+
+class _CompVisPosteriorWrapper:
+    """Makes CompVis posterior match diffusers .latent_dist API."""
+    def __init__(self, posterior):
+        self.latent_dist = posterior
+
+    # Allow direct access: vae.encode(x).latent_dist.mode() / .sample()
+
+
+class _CompVisDecodeWrapper:
+    """Makes CompVis decode output match diffusers .sample API."""
+    def __init__(self, tensor):
+        self.sample = tensor
+
+
 @torch.no_grad()
 def get_vae_pairs(vae, images):
     """
-    Get (latent, decoded_image) pairs from the frozen SD-VAE.
+    Get (latent, decoded_image) pairs from the frozen VAE.
     These are the training targets for our SPNN decoder.
+    Works with both diffusers and CompVis (wrapped) VAEs.
     """
     posterior = vae.encode(images).latent_dist
     latent = posterior.sample()
@@ -90,7 +164,12 @@ def train(args):
         print(f"Dataset: {len(dataset)} images, {len(loader)} batches/epoch")
 
     # ── Frozen models (not wrapped by accelerate — just move to device) ──
-    vae = load_sd_vae(device, verbose=is_main)
+    if getattr(args, 'compvis_ckpt', None) is not None:
+        compvis_vae = load_compvis_vae(
+            args.compvis_ckpt, args.compvis_model_config, device, verbose=is_main)
+        vae = CompVisVAEWrapper(compvis_vae)
+    else:
+        vae = load_sd_vae(device, verbose=is_main)
     spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden,
                            r_hidden=args.hidden,
                            scale_bound=args.scale_bound).to(device)
@@ -140,6 +219,7 @@ def train(args):
         optimizer, T_max=args.num_epochs * len(loader), eta_min=1e-6
     )
     mse_loss = nn.MSELoss()
+    l1_loss = nn.L1Loss()
     best_loss = float('inf')
     best_ckpt_path = os.path.join(args.output_dir, "spnn_vae_best.pt")
     start_epoch = 1
@@ -195,10 +275,10 @@ def train(args):
             spnn_decoded = unwrapped.decode(vae_latent)
             decoder_distill_loss = mse_loss(spnn_decoded, vae_decoded)
 
-            # ── Decoder GT loss: feed VAE latent, match original image ──
+            # ── Decoder GT loss: feed VAE latent, match original image (L1) ──
             decoder_gt_loss = torch.tensor(0.0, device=device)
             if args.lambda_decoder_gt > 0:
-                decoder_gt_loss = mse_loss(spnn_decoded, images)
+                decoder_gt_loss = l1_loss(spnn_decoded, images)
 
             # ── LPIPS perceptual loss ──
             lpips_loss = torch.tensor(0.0, device=device)
