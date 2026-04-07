@@ -11,7 +11,7 @@ openai diffusion modules.
 import torch
 
 
-def load_compvis_unet(ckpt_path, device):
+def load_compvis_unet(ckpt_path, device, state_dict=None):
     """
     Load the UNet from a CompVis LDM checkpoint.
 
@@ -21,13 +21,17 @@ def load_compvis_unet(ckpt_path, device):
     Args:
         ckpt_path: path to the .ckpt file
         device: torch device
+        state_dict: pre-loaded state dict (skips torch.load if provided)
 
     Returns:
         unet: nn.Module with forward(x, t) -> noise prediction
     """
-    print(f"Loading CompVis checkpoint from {ckpt_path}...")
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    sd = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    if state_dict is not None:
+        sd = state_dict
+    else:
+        print(f"Loading CompVis checkpoint from {ckpt_path}...")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        sd = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
 
     # Extract UNet weights (strip prefix)
     unet_sd = {}
