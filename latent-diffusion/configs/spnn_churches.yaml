@@ -1,0 +1,63 @@
+model:
+  base_learning_rate: 4.5e-6
+  target: spnn_ldm.SPNNAutoencoderLDM
+  params:
+    monitor: "val/rec_loss"
+    image_key: "image"
+    lambda_cycle: 0.3
+    lambda_roundtrip: 0.3
+    lambda_align: 0.1
+
+    spnn_config:
+      mix_type: "cayley"
+      hidden: 256
+      r_hidden: 256
+      scale_bound: 2.0
+
+    lossconfig:
+      target: ldm.modules.losses.LPIPSWithDiscriminator
+      params:
+        disc_start: 50001
+        kl_weight: 0.0
+        disc_weight: 0.5
+        perceptual_weight: 1.0
+
+    frozen_vae_config:
+      ckpt_path: "../DDNM-main/models/lsun_churches.ckpt"
+      model_config: "../DDNM-main/models/lsun_churches-ldm-kl-8.yaml"
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 12
+    wrap: False
+    num_workers: 16
+    train:
+      target: spnn_ldm.LSUNChurchesHFTrain
+      params:
+        size: 256
+    validation:
+      target: spnn_ldm.LSUNChurchesHFValidation
+      params:
+        size: 256
+
+lightning:
+  logger:
+    target: pytorch_lightning.loggers.WandbLogger
+    params:
+      name: spnn_churches_gan
+      project: spnn-vae
+      entity: yamitehrlich-technion-israel-institute-of-technology
+      save_dir: logs/
+
+  callbacks:
+    image_logger:
+      target: main.ImageLogger
+      params:
+        batch_frequency: 1000
+        max_images: 8
+        increase_log_steps: True
+
+  trainer:
+    benchmark: True
+    accumulate_grad_batches: 2
