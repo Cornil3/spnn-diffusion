@@ -447,7 +447,8 @@ class Diffusion(object):
                                 x0_t_hat_pixel = None
                             else:
                                 x0_t_pixel = codec.decode(x0_t)
-                                x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
+                                #x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
+                                x0_t_hat_pixel = x0_t_pixel
                                 x0_t_hat = codec.encode(x0_t_hat_pixel)
                         else:
                             x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
@@ -819,12 +820,15 @@ class Diffusion(object):
         from functions.codec import load_codec
         from functions.compvis_unet import load_compvis_unet
 
-        # Load unconditional UNet directly from CompVis checkpoint
+        # Load CompVis checkpoint once, pass state dict to UNet and codec loaders
         ckpt_path = config.model.compvis_ckpt_path
-        unet = load_compvis_unet(ckpt_path, self.device)
+        print(f"Loading CompVis checkpoint from {ckpt_path}...")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        compvis_sd = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
 
-        # Load codec(s) — scaling factor override handled in load_codec
-        vae_codec, spnn_codec = load_codec(config, self.device)
+        unet = load_compvis_unet(ckpt_path, self.device, state_dict=compvis_sd)
+        vae_codec, spnn_codec = load_codec(config, self.device, compvis_state_dict=compvis_sd)
+        del compvis_sd
 
         # Simple wrapper — unconditional, no CFG, no text embeddings
         def model_fn(zt, t):
