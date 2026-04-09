@@ -70,6 +70,13 @@ class SPNNAutoencoderLDM(pl.LightningModule):
 
         # ── Loss (LPIPSWithDiscriminator — includes discriminator, logvar, adaptive weight) ──
         self.loss = instantiate_from_config(lossconfig)
+        # Patch adaptive weight to use a tighter clamp (default 1e4 is too high for SPNN)
+        _orig_calc = self.loss.calculate_adaptive_weight
+        def _safe_adaptive_weight(nll_loss, g_loss, last_layer=None):
+            d_weight = _orig_calc(nll_loss, g_loss, last_layer=last_layer)
+            d_weight = torch.clamp(d_weight, 0.0, 10.0)
+            return d_weight
+        self.loss.calculate_adaptive_weight = _safe_adaptive_weight
 
         # ── Frozen CompVis VAE for align/cycle losses ──
         self._load_frozen_vae(frozen_vae_config)
@@ -277,8 +284,12 @@ class SPNNAutoencoderLDM(pl.LightningModule):
         return [opt_ae, opt_disc], []
 
     def get_last_layer(self):
-        """Last trainable conv in SPNN decode path (r network of second-to-last block)."""
-        return self.spnn.blocks[1].r.out.weight
+        """Last non-zero-init conv in SPNN decode path.
+        Uses the s network's final ResBlock conv in blocks[1] (the last coupling block
+        before PixelShuffle to output). This layer has standard init (non-zero) so the
+        adaptive weight gradient ratio is meaningful.
+        """
+        return self.spnn.blocks[1].s.dec_blocks[2].block[3].weight
 
     @torch.no_grad()
     def log_images(self, batch, only_inputs=False, **kwargs):
