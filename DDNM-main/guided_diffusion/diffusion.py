@@ -425,7 +425,6 @@ class Diffusion(object):
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
-                        sigma_t = (1 - at / at_next).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -447,15 +446,20 @@ class Diffusion(object):
                                 x0_t_hat_pixel = None
                             else:
                                 x0_t_pixel = codec.decode(x0_t)
-                                #x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
-                                x0_t_hat_pixel = x0_t_pixel
+                                x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
+                                #x0_t_hat_pixel = x0_t_pixel
                                 x0_t_hat = codec.encode(x0_t_hat_pixel)
                         else:
                             x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
 
-                        # Standard DDIM step
-                        c2 = (1 - at_next - sigma_t ** 2).clamp(min=0).sqrt()
-                        xt_next = at_next.sqrt() * x0_t_hat + c2 * et + sigma_t * torch.randn_like(x0_t)
+                        # DDIM step with configurable eta (0=deterministic, 1=full stochastic)
+                        eta = getattr(args, 'eta', 0.0)
+                        sigma_t = eta * ((1 - at_next) / (1 - at) * (1 - at / at_next)).clamp(min=0).sqrt()
+                        pred_dir = (1 - at_next - sigma_t ** 2).clamp(min=0).sqrt()
+                        if j == -1:
+                            xt_next = x0_t_hat
+                        else:
+                            xt_next = at_next.sqrt() * x0_t_hat + pred_dir * et + sigma_t * torch.randn_like(x0_t)
 
                         # Collect debug frames for GIF
                         if save_debug:
@@ -832,9 +836,9 @@ class Diffusion(object):
 
         # Simple wrapper — unconditional, no CFG, no text embeddings
         def model_fn(zt, t):
-            # CompVis UNet expects t as integer tensor
+            # CompVis UNet uses sinusoidal timestep embedding (accepts float)
             if not torch.is_tensor(t):
-                t = torch.tensor([t], device=zt.device).long()
+                t = torch.tensor([t], device=zt.device)
             if t.dim() == 0:
                 t = t.unsqueeze(0).expand(zt.size(0))
             return unet(zt, t)
