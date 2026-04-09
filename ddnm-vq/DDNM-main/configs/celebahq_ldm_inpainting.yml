@@ -1,0 +1,37 @@
+data:
+  dataset: HF_CelebA_HQ
+  hf_name: korexyz/celeba-hq-256x256
+  hf_split: validation
+  image_size: 256
+  channels: 3
+  num_workers: 4
+  random_flip: false
+  rescaled: true
+  logit_transform: false
+  uniform_dequantization: false
+  gaussian_dequantization: false
+  out_of_dist: false
+  
+model:
+  type: latent_celebahq_ldm
+  var_type: fixedsmall
+
+diffusion:
+  beta_schedule: linear
+  beta_start: 0.0015
+  beta_end: 0.0195
+  num_diffusion_timesteps: 1000
+
+sampling:
+  batch_size: 1
+
+time_travel:
+  T_sampling: 200
+  travel_length: 1
+  travel_repeat: 1
+
+codec:
+  use_spnn: true
+  spnn_checkpoint: vqvae_latest.pt
+  spnn_mix_type: cayley
+  spnn_scale_bound: 2.0

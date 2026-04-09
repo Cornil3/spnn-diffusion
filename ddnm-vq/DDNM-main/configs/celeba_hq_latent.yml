@@ -1,0 +1,38 @@
+data:
+    dataset: "CelebA_HQ"
+    category: ""
+    image_size: 512
+    channels: 3
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: true
+    rescaled: true
+    num_workers: 32
+    out_of_dist: false
+
+model:
+    type: "latent_sd15"
+    var_type: fixedsmall
+    guidance_scale: 1.0
+
+codec:
+    type: "spnn"
+    spnn_checkpoint: "../checkpoints_celebahq_distill_512/spnn_vae_best_512.pt"
+    spnn_mix_type: "cayley"
+    spnn_hidden: 256
+    spnn_scale_bound: 2.0
+
+diffusion:
+    beta_schedule: linear
+    beta_start: 0.00085
+    beta_end: 0.012
+    num_diffusion_timesteps: 1000
+
+sampling:
+    batch_size: 1
+
+time_travel:
+    T_sampling: 100
+    travel_length: 1
+    travel_repeat: 1
