@@ -22,7 +22,7 @@ model:
 
 codec:
     type: "spnn"
-    spnn_checkpoint: "../checkpoints_churches/spnn_vae_best.pt"
+    spnn_checkpoint: "../checkpoints_churches_gt/spnn_vae_best.pt"
     spnn_mix_type: "cayley"
     spnn_hidden: 256
     spnn_scale_bound: 2.0
@@ -45,6 +45,6 @@ sampling:
     batch_size: 1
 
 time_travel:
-    T_sampling: 100
+    T_sampling: 30
     travel_length: 1
     travel_repeat: 1
