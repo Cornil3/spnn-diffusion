@@ -193,6 +193,7 @@ class ConvMLP(nn.Module):
             x = x.exp()
         else:
             x = torch.tanh(x)
+            #x = x
         return x
 
 
@@ -239,10 +240,14 @@ class ConvPINNBlock(nn.Module):
         x0 = x[:, :self.out_ch]
         x1 = x[:, self.out_ch:]
         y = x0 * self.s(x1) + self.t(x1)
+        # Store for diagnostics (overwritten each forward call)
+        self._diag_x1_true = x1.detach()
         return y
 
     def pinv(self, y):
         x1 = self.r(y)
+        # Store for diagnostics
+        self._diag_x1_pred = x1.detach()
         x0 = (y - self.t(x1)) * self.s(x1, neg=True)
         x = torch.cat([x0, x1], dim=1)
         return self.mix.inverse(x)
@@ -335,5 +340,57 @@ class SPNNAutoencoder(nn.Module):
         for b in reversed(self.blocks):
             y = b.pinv(y)
         return y
+
+    @torch.no_grad()
+    def diagnose_r_networks(self, images):
+        """
+        Run encode then decode on a batch, then print diagnostics for each
+        ConvPINNBlock's r network: true x1 range vs predicted x1 range,
+        and per-block reconstruction error.
+
+        Usage:
+            spnn.eval()
+            spnn.diagnose_r_networks(batch_of_images)
+        """
+        z = self.encode(images)
+        x_hat = self.decode(z)
+
+        print(f"\n{'='*70}")
+        print(f"SPNN r-network diagnostics  (batch={images.shape[0]})")
+        print(f"{'='*70}")
+        print(f"Overall roundtrip MSE: {torch.nn.functional.mse_loss(x_hat, images).item():.6f}")
+        print()
+
+        for i, block in enumerate(self.blocks):
+            if not isinstance(block, ConvPINNBlock):
+                continue
+
+            x1_true = block._diag_x1_true
+            x1_pred = block._diag_x1_pred
+
+            mse = torch.nn.functional.mse_loss(x1_pred, x1_true).item()
+            mae = torch.mean(torch.abs(x1_pred - x1_true)).item()
+
+            # True x1 stats
+            t_min = x1_true.min().item()
+            t_max = x1_true.max().item()
+            t_mean = x1_true.mean().item()
+            t_std = x1_true.std().item()
+            t_abs_gt1 = (x1_true.abs() > 1.0).float().mean().item() * 100
+
+            # Predicted x1 stats (r output, after tanh)
+            p_min = x1_pred.min().item()
+            p_max = x1_pred.max().item()
+            p_mean = x1_pred.mean().item()
+            p_std = x1_pred.std().item()
+
+            print(f"Block {i}: ConvPINNBlock({block.in_ch}→{block.out_ch}), "
+                  f"r reconstructs {block.out_ch}→{block.in_ch - block.out_ch} channels")
+            print(f"  x1 true  — min={t_min:+.4f}  max={t_max:+.4f}  "
+                  f"mean={t_mean:+.4f}  std={t_std:.4f}  |x1|>1: {t_abs_gt1:.1f}%")
+            print(f"  x1 pred  — min={p_min:+.4f}  max={p_max:+.4f}  "
+                  f"mean={p_mean:+.4f}  std={p_std:.4f}")
+            print(f"  r error  — MSE={mse:.6f}  MAE={mae:.4f}")
+            print()
 
 
