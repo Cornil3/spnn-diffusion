@@ -55,11 +55,14 @@ class SPNNAutoencoderLDM(pl.LightningModule):
                  lambda_cycle=0.3,
                  lambda_roundtrip=0.3,
                  lambda_align=0.1,
+                 accumulate_grad_batches=2,
                  image_key="image",
                  monitor=None,
                  ckpt_path=None,
                  ):
         super().__init__()
+        self.automatic_optimization = False
+        self.accumulate_grad_batches = accumulate_grad_batches
         self.image_key = image_key
 
         # ── SPNN model ──
@@ -197,40 +200,49 @@ class SPNNAutoencoderLDM(pl.LightningModule):
 
         return loss, log
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
         inputs = self.get_input(batch, self.image_key)
         reconstructions, posterior = self(inputs)
 
-        if optimizer_idx == 0:
-            # ── Generator (SPNN) update ──
-            # CompVis reconstruction + GAN loss
-            aeloss, log_dict_ae = self.loss(
-                inputs, reconstructions, posterior, optimizer_idx,
-                self.global_step, last_layer=self.get_last_layer(), split="train"
-            )
+        opt_ae, opt_disc = self.optimizers()
+        accum = self.accumulate_grad_batches
+        should_step = (batch_idx + 1) % accum == 0
 
-            # SPNN-specific losses
-            z_spnn = posterior.mode()
-            spnn_loss, spnn_log = self._spnn_losses(inputs, z_spnn, reconstructions)
+        # ── Step 1: Generator (SPNN) update ──
+        aeloss, log_dict_ae = self.loss(
+            inputs, reconstructions, posterior, 0,
+            self.global_step, last_layer=self.get_last_layer(), split="train"
+        )
 
-            total_loss = aeloss + spnn_loss
+        # SPNN-specific losses
+        z_spnn = posterior.mode()
+        spnn_loss, spnn_log = self._spnn_losses(inputs, z_spnn, reconstructions)
 
-            self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log("spnn_loss", spnn_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-            self.log_dict(spnn_log, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-            return total_loss
+        total_loss = (aeloss + spnn_loss) / accum
 
-        if optimizer_idx == 1:
-            # ── Discriminator update ──
-            discloss, log_dict_disc = self.loss(
-                inputs, reconstructions, posterior, optimizer_idx,
-                self.global_step, last_layer=self.get_last_layer(), split="train"
-            )
+        self.manual_backward(total_loss)
+        if should_step:
+            opt_ae.step()
+            opt_ae.zero_grad()
 
-            self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-            return discloss
+        # ── Step 2: Discriminator update ──
+        discloss, log_dict_disc = self.loss(
+            inputs, reconstructions, posterior, 1,
+            self.global_step, last_layer=self.get_last_layer(), split="train"
+        )
+
+        self.manual_backward(discloss / accum)
+        if should_step:
+            opt_disc.step()
+            opt_disc.zero_grad()
+
+        # ── Logging (unscaled losses) ──
+        self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        self.log("spnn_loss", spnn_loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        self.log_dict(spnn_log, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
 
     def validation_step(self, batch, batch_idx):
         inputs = self.get_input(batch, self.image_key)

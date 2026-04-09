@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH -A shocher_prj
-#SBATCH -p h200-shared
-#SBATCH --qos=72h_8g
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH -p rtx6k-shocher
+#SBATCH --qos=contrib
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=96G
+#SBATCH --time=7-00:00:00
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
 #SBATCH --job-name=spnn_churches_gan
@@ -16,4 +17,4 @@ cd /home/yamitehrlich/work/spnn-diffusion/latent-diffusion
 
 source ../venv/bin/activate
 
-python train_spnn.py --gpus 4
+python main.py --base configs/spnn_churches.yaml -t --gpus 0, 1
