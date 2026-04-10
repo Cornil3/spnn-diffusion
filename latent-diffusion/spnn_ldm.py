@@ -310,23 +310,35 @@ class LSUNChurchesHF(Dataset):
     """
     LSUN Churches from HuggingFace, returning dicts compatible with CompVis pipeline.
     Images are returned as numpy HWC float32 in [-1, 1].
+
+    Uses a reproducible random 90/10 train/val split with seed 42.
     """
 
-    def __init__(self, size=256, split="train", n_test=1000, flip_p=0.5):
+    def __init__(self, size=256, split="train", val_fraction=0.1, seed=42, flip_p=0.5):
         from datasets import load_dataset
+        import random as _random
+
         print("Loading tglcourse/lsun_church_train from HuggingFace...")
         ds = load_dataset("tglcourse/lsun_church_train", split="train")
 
         n = len(ds)
-        n_test = min(n_test, n)
-        n_train = n - n_test
+        # Reproducible shuffle: same seed → same indices every run
+        indices = list(range(n))
+        _random.Random(seed).shuffle(indices)
+
+        n_val = int(round(val_fraction * n))
+        # Validation: first n_val from shuffled order
+        val_indices = sorted(indices[:n_val])
+        # Training: remaining indices
+        train_indices = sorted(indices[n_val:])
 
         if split == "train":
-            ds = ds.select(range(n_train))
+            ds = ds.select(train_indices)
         elif split == "val":
-            ds = ds.select(range(n_train, n))
+            ds = ds.select(val_indices)
 
-        print(f"  Split: {split} — {len(ds)} images")
+        print(f"  Split: {split} — {len(ds)} images "
+              f"(total {n}, val_fraction={val_fraction}, seed={seed})")
         self.ds = ds
         self.size = size
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
