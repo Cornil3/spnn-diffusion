@@ -110,6 +110,10 @@ def parse_args_and_config():
         "--bp_stop", type=float, default=1.0,
         help="Stop BP after this fraction of steps (e.g. 0.5 = BP only in first half)"
     )
+    parser.add_argument(
+        "--bp_start", type=float, default=0.0,
+        help="Start BP after this fraction of steps (e.g. 0.3 = skip BP in first 30%% of steps)"
+    )
 
     args = parser.parse_args()
 

@@ -437,10 +437,12 @@ class Diffusion(object):
 
                         lambda_t = 1.
                         bp_stop_pct = getattr(args, 'bp_stop', 1.0)
+                        bp_start_pct = getattr(args, 'bp_start', 0.0)
                         if is_latent:
                             freq = bp_freq_per_step[min(step_count - 1, len(bp_freq_per_step) - 1)]
                             bp_past_stop = step_count > total_steps * bp_stop_pct
-                            do_bp = (step_count % freq == 0) and not bp_past_stop
+                            bp_before_start = step_count < total_steps * bp_start_pct
+                            do_bp = (step_count % freq == 0) and not bp_past_stop and not bp_before_start
                             if not do_bp:
                                 x0_t_hat = x0_t
                                 x0_t_hat_pixel = None
@@ -809,6 +811,10 @@ class Diffusion(object):
 
         for codec_name, codec in codecs_to_run.items():
             print(f"\n--- Running with {codec_name} codec ---")
+            # Re-seed global RNG so each codec run sees the same initial noise
+            # and the same DDIM stochastic draws (fair decoder comparison).
+            torch.manual_seed(args.seed)
+            torch.cuda.manual_seed_all(args.seed)
             # Store codec on self so simplified_ddnm_plus can use it
             self._codec = codec
             self._latent_shape = (4, config.data.image_size // 8, config.data.image_size // 8)
@@ -850,6 +856,10 @@ class Diffusion(object):
 
         for codec_name, codec in codecs_to_run.items():
             print(f"\n--- Running with {codec_name} codec ---")
+            # Re-seed global RNG so each codec run sees the same initial noise
+            # and the same DDIM stochastic draws (fair decoder comparison).
+            torch.manual_seed(args.seed)
+            torch.cuda.manual_seed_all(args.seed)
             self._codec = codec
             self._latent_shape = (4, config.data.image_size // 8,
                                   config.data.image_size // 8)
