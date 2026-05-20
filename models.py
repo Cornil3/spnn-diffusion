@@ -4,6 +4,12 @@ import torch.nn.functional as F
 
 
 class BaseOrthogonal1x1Conv(nn.Module):
+    """
+    Base class for orthogonal 1x1 convolutions.
+
+    Subclasses must implement:
+        _compute_W(device, dtype) -> [C, C] orthogonal matrix
+    """
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
@@ -13,13 +19,20 @@ class BaseOrthogonal1x1Conv(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        Wm = self._compute_W(x.device, x.dtype).view(C, C, 1, 1)
-        return F.conv2d(x, Wm)
+        assert C == self.channels, f"Expected {self.channels} channels, got {C}"
+
+        W = self._compute_W(x.device, x.dtype)   # [C, C]
+        weight = W.view(C, C, 1, 1)              # [C_out, C_in, 1, 1]
+        return F.conv2d(x, weight)
 
     def inverse(self, x):
         B, C, H, W = x.shape
-        Wm = self._compute_W(x.device, x.dtype).t().view(C, C, 1, 1)
-        return F.conv2d(x, Wm)
+        assert C == self.channels, f"Expected {self.channels} channels, got {C}"
+
+        W = self._compute_W(x.device, x.dtype)   # [C, C]
+        W_inv = W.t()
+        weight = W_inv.view(C, C, 1, 1)
+        return F.conv2d(x, weight)
 
 
 class Cayley1x1Conv(BaseOrthogonal1x1Conv):
@@ -39,27 +52,72 @@ class Cayley1x1Conv(BaseOrthogonal1x1Conv):
 
 
 class Householder1x1Conv(BaseOrthogonal1x1Conv):
+    """
+    Orthogonal 1x1 conv via product of Householder reflections:
+        W = H_k ... H_1, H_i = I - 2 v_i v_i^T / ||v_i||^2
+
+    Forward and inverse apply reflections directly to x (rank-1 updates)
+    without materializing the full W matrix, giving machine-precision
+    accuracy at any channel count.
+    """
+
     def __init__(self, channels, num_reflections=8, eps=1e-8):
         super().__init__(channels)
         self.num_reflections = num_reflections
         self.eps = eps
+
         if num_reflections > 0:
-            self.V = nn.Parameter(torch.randn(num_reflections, channels))
+            V = torch.randn(num_reflections, channels)
+            self.V = nn.Parameter(V)
         else:
             self.register_parameter("V", None)
 
+    def _get_normalized_V(self, device, dtype):
+        """Return normalized reflection vectors [K, C]."""
+        V = self.V.to(device=device, dtype=dtype)
+        return V / (V.norm(p=2, dim=1, keepdim=True) + self.eps)
+
     def _compute_W(self, device, dtype):
+        """Materialize full W matrix (for compatibility). Prefer forward/inverse."""
         C = self.channels
         if self.V is None or self.num_reflections == 0:
             return torch.eye(C, device=device, dtype=dtype)
         W = torch.eye(C, device=device, dtype=dtype)
-        V = self.V.to(device=device, dtype=dtype)
+        V_norm = self._get_normalized_V(device, dtype)
         for i in range(self.num_reflections):
-            v = V[i]
-            v = v / (v.norm(p=2) + self.eps)
+            v = V_norm[i]
             H = torch.eye(C, device=device, dtype=dtype) - 2.0 * torch.outer(v, v)
             W = H @ W
         return W
+
+    def forward(self, x):
+        """Apply W = H_k ... H_1 to x via sequential rank-1 updates."""
+        if self.V is None or self.num_reflections == 0:
+            return x
+        B, C, H, W = x.shape
+        V_norm = self._get_normalized_V(x.device, x.dtype)  # [K, C]
+        # Reshape to [B, C, H*W] for batched dot products
+        y = x.reshape(B, C, -1)
+        # Apply H_1, then H_2, ..., H_k (forward order)
+        for i in range(self.num_reflections):
+            v = V_norm[i]  # [C]
+            dots = torch.einsum('c,bcn->bn', v, y)  # [B, H*W]
+            y = y - 2.0 * v[None, :, None] * dots[:, None, :]
+        return y.reshape(B, C, H, W)
+
+    def inverse(self, x):
+        """Apply W^T = H_1 ... H_k to x (reverse order, since H_i^T = H_i)."""
+        if self.V is None or self.num_reflections == 0:
+            return x
+        B, C, H, W = x.shape
+        V_norm = self._get_normalized_V(x.device, x.dtype)  # [K, C]
+        y = x.reshape(B, C, -1)
+        # Apply H_k, then H_{k-1}, ..., H_1 (reverse order)
+        for i in range(self.num_reflections - 1, -1, -1):
+            v = V_norm[i]
+            dots = torch.einsum('c,bcn->bn', v, y)
+            y = y - 2.0 * v[None, :, None] * dots[:, None, :]
+        return y.reshape(B, C, H, W)
 
 
 class ResBlock(nn.Module):
@@ -191,8 +249,6 @@ class ConvMLP(nn.Module):
             if neg:
                 x = -x
             x = x.exp()
-        else:
-            x = torch.tanh(x)
         return x
 
 
