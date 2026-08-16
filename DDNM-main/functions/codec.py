@@ -52,17 +52,13 @@ class SPNNCodec:
         self.spnn = spnn
         self.sf = scaling_factor
 
-    def encode(self, x, return_latents=False):
-        """Pixel [-1,1] -> scaled latent. Optionally return side-info for bijective decode."""
-        out = self.spnn.encode(x, return_latents=return_latents)
-        if return_latents:
-            z, latents = out
-            return z * self.sf, latents
-        return out * self.sf
+    def encode(self, x):
+        """Pixel [-1,1] -> scaled latent."""
+        return self.spnn.encode(x) * self.sf
 
-    def decode(self, z, latents=None):
-        """Scaled latent -> pixel [-1,1]. If latents provided, uses exact bijective path."""
-        return self.spnn.decode(z / self.sf, latents=latents)
+    def decode(self, z):
+        """Scaled latent -> pixel [-1,1]."""
+        return self.spnn.decode(z / self.sf)
 
 
 def _load_compvis_vae(ckpt_path, model_config_path, device, state_dict=None):
