@@ -70,13 +70,13 @@ class SPNNAutoencoderLDM(pl.LightningModule):
 
         # ── Loss (LPIPSWithDiscriminator — includes discriminator, logvar, adaptive weight) ──
         self.loss = instantiate_from_config(lossconfig)
-        # Patch adaptive weight to use a tighter clamp (default 1e4 is too high for SPNN)
-        _orig_calc = self.loss.calculate_adaptive_weight
-        def _safe_adaptive_weight(nll_loss, g_loss, last_layer=None):
-            d_weight = _orig_calc(nll_loss, g_loss, last_layer=last_layer)
-            d_weight = torch.clamp(d_weight, 0.0, 10.0)
-            return d_weight
-        self.loss.calculate_adaptive_weight = _safe_adaptive_weight
+        # Bypass adaptive weight: SPNN has no equivalent to VAE's decoder.conv_out
+        # for meaningful gradient ratio computation. Use fixed disc_weight instead.
+        # Original: d_weight = gradient_ratio * self.discriminator_weight
+        # Ours: d_weight = 1.0 * self.discriminator_weight = disc_weight from config
+        # So effective GAN multiplier = disc_weight * disc_factor * g_loss
+        disc_w = self.loss.discriminator_weight
+        self.loss.calculate_adaptive_weight = lambda nll_loss, g_loss, last_layer=None: torch.tensor(disc_w)
 
         # ── Frozen CompVis VAE for align/cycle losses ──
         self._load_frozen_vae(frozen_vae_config)
@@ -264,10 +264,56 @@ class SPNNAutoencoderLDM(pl.LightningModule):
             last_layer=self.get_last_layer(), split="val"
         )
 
-        self.log("val/rec_loss", log_dict_ae["val/rec_loss"])
-        self.log_dict(log_dict_ae)
-        self.log_dict(log_dict_disc)
+        # sync_dist=True ensures val metrics are averaged across all GPUs.
+        # This matters for val/rec_loss in particular since it's the monitor
+        # metric used by ModelCheckpoint to decide "best" checkpoints.
+        self.log("val/rec_loss", log_dict_ae["val/rec_loss"],
+                 on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(log_dict_ae, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(log_dict_disc, on_step=False, on_epoch=True, sync_dist=True)
+
+        # Penrose identity checks — averaged over the full val set via Lightning
+        self._penrose_check(inputs)
+
         return self.log_dict
+
+    @torch.no_grad()
+    def _penrose_check(self, inputs):
+        """
+        Compute Penrose pseudo-inverse identities for the current val batch.
+        Logged with on_epoch=True, so Lightning automatically averages across
+        the full validation set.
+
+        g  = spnn.encode  (forward)
+        g' = spnn.decode  (pinv)
+        """
+        was_training = self.spnn.training
+        self.spnn.eval()
+        try:
+            x = inputs
+            # Use the frozen CompVis VAE latents as the reference z
+            z = self._get_vae_latent(x)
+
+            gx = self.spnn.encode(x)
+            gpgx = self.spnn.decode(gx)
+            ggpgx = self.spnn.encode(gpgx)
+
+            gpz = self.spnn.decode(z)
+            ggpz = self.spnn.encode(gpz)
+            gpggpz = self.spnn.decode(ggpz)
+
+            metrics = {
+                "val/penrose/ggg_eq_g":    nn.functional.mse_loss(ggpgx, gx),
+                "val/penrose/gpggp_eq_gp": nn.functional.mse_loss(gpggpz, gpz),
+                "val/penrose/ggp_eq_id":   nn.functional.mse_loss(ggpz, z),
+                "val/penrose/roundtrip":   nn.functional.mse_loss(gpgx, x),
+            }
+
+            # on_epoch=True (default) averages across all val batches
+            self.log_dict(metrics, on_step=False, on_epoch=True, sync_dist=True)
+        finally:
+            if was_training:
+                self.spnn.train()
 
     def configure_optimizers(self):
         lr = self.learning_rate

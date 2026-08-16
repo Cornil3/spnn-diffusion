@@ -4,9 +4,12 @@ model:
   params:
     monitor: "val/rec_loss"
     image_key: "image"
-    lambda_cycle: 0.3
-    lambda_roundtrip: 0.3
-    lambda_align: 0.1
+    # SPNN losses scaled to match CompVis's summed nll_loss magnitude (~60K).
+    # Original train.py values were 0.3/0.3/0.1 with mean-reduced rec_loss (~0.3).
+    # Multiplied by ~500 to be proportional to summed nll_loss.
+    lambda_cycle: 150.0
+    lambda_roundtrip: 150.0
+    lambda_align: 50.0
 
     spnn_config:
       mix_type: "cayley"
@@ -19,8 +22,9 @@ model:
       params:
         disc_start: 50001
         kl_weight: 0.0
-        disc_weight: 0.5
+        disc_weight: 0.1
         perceptual_weight: 1.0
+        disc_loss: "vanilla"
 
     frozen_vae_config:
       ckpt_path: "../DDNM-main/models/lsun_churches.ckpt"

@@ -196,6 +196,29 @@ def main():
     args, config = parse_args_and_config()
 
     try:
+        import wandb
+        wandb.init(
+            project="ddnm-diagnostics",
+            config={
+                "config": args.config,
+                "deg": args.deg,
+                "deg_scale": args.deg_scale,
+                "sigma_y": args.sigma_y,
+                "eta": args.eta,
+                "seed": args.seed,
+                "simplified": args.simplified,
+                "bp_every": getattr(args, 'bp_every', 1),
+                "bp_stop": getattr(args, 'bp_stop', 1.0),
+                "bp_start": getattr(args, 'bp_start', 0.0),
+            },
+        )
+        print(f"wandb initialized: {wandb.run.url}")
+    except ImportError:
+        print("wandb not installed, skipping logging")
+    except Exception as e:
+        print(f"wandb init failed: {e}")
+
+    try:
         runner = Diffusion(args, config)
         runner.sample(args.simplified)
     except Exception:

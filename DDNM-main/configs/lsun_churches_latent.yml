@@ -31,7 +31,7 @@ codec:
     # with: ckpt['state_dict']['scale_factor']
     # Then set it here or handle in the codec loader.
     # Set to 1.0 to disable SD-style scaling in codec.
-    compvis_scale_factor: 0.2458
+    compvis_scale_factor: 0.24578019976615906
 
 diffusion:
     # CompVis "linear" = linspace(sqrt(start), sqrt(end), T)^2
@@ -45,6 +45,6 @@ sampling:
     batch_size: 1
 
 time_travel:
-    T_sampling: 30
+    T_sampling: 100 #50
     travel_length: 1
     travel_repeat: 1

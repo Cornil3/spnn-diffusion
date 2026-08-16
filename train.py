@@ -128,7 +128,7 @@ def save_cycle_comparison(spnn, images, epoch, sample_dir, num_cycles=5):
 
 def train(args):
     # ── Accelerator (handles DDP, mixed precision, device placement) ──
-    accelerator = Accelerator(mixed_precision='bf16')
+    accelerator = Accelerator(mixead_precision='bf16')
     device = accelerator.device
     is_main = accelerator.is_main_process
 

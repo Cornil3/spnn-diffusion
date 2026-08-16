@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 import time
 import glob
 
@@ -7,6 +8,7 @@ import numpy as np
 from PIL import Image
 import tqdm
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 
 from datasets import get_dataset, data_transform, inverse_data_transform
@@ -24,6 +26,12 @@ from scipy.linalg import orth
 
 def get_gaussian_noisy_img(img, noise_level):
     return img + torch.randn_like(img).cuda() * noise_level
+
+def _calc_psnr_neg11(a, b):
+    """PSNR for tensors in [-1,1] range (peak=2)."""
+    mse = F.mse_loss(a, b).item()
+    return 10 * math.log10(4.0 / mse) if mse > 0 else float('inf')
+
 
 def MeanUpsample(x, scale):
     n, c, h, w = x.shape
@@ -333,7 +341,22 @@ class Diffusion(object):
             raise NotImplementedError("degradation type not supported")
 
         sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
-        
+
+        # wandb diagnostic setup
+        try:
+            import wandb
+            _use_wandb = wandb.run is not None
+        except ImportError:
+            _use_wandb = False
+        if _use_wandb:
+            _wb_prefix = codec_name if codec_name else "pixel"
+            _all_cosines = []
+            _all_amplifications = []
+            _all_codec_costs = []
+            _all_codec_floors = []
+            _all_range_mses = []
+            _all_null_mses = []
+
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
@@ -392,7 +415,10 @@ class Diffusion(object):
                 # Build BP schedule: more frequent at start (high noise), less at end
                 # bp_schedule is a string like "1,1,1,2,2,5,5,10,10,20" (per phase)
                 # or use bp_every for uniform spacing
-                total_steps = config.time_travel.T_sampling
+                # NOTE: count actual forward passes, not config.T_sampling — with
+                # time-travel (travel_repeat>1), the number of forward steps can be
+                # much larger than T_sampling, and the BP schedule must match.
+                total_steps = sum(1 for ii, jj in time_pairs if jj < ii)
                 bp_schedule_str = getattr(args, 'bp_schedule', '')
                 if bp_schedule_str:
                     # Parse schedule: divide steps into equal phases,
@@ -415,6 +441,7 @@ class Diffusion(object):
                 frames_x0_t_hat = []
 
                 step_count = 0
+                _last_x0_t_hat_pixel = None
                 for i, j in tqdm.tqdm(time_pairs):
                     i, j = i*skip, j*skip
                     if j<0: j=-1
@@ -435,7 +462,7 @@ class Diffusion(object):
                         # Tweedie: estimate clean sample
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        lambda_t = 1.
+                        lambda_t = 0.0625
                         bp_stop_pct = getattr(args, 'bp_stop', 1.0)
                         bp_start_pct = getattr(args, 'bp_start', 0.0)
                         if is_latent:
@@ -449,8 +476,45 @@ class Diffusion(object):
                             else:
                                 x0_t_pixel = codec.decode(x0_t)
                                 x0_t_hat_pixel = x0_t_pixel - lambda_t*Ap(A(x0_t_pixel) - y)
+                                """
+                                x0_t_pixel = Ap(A)*x0_t_pixel + (I-Ap(A))*x0_t_pixel
+                                x0_t_hat_pixel = Ap(y) + (I-Ap(A))*x0_t_pixel
+                                x0_t_hat_pixel = Ap(A(x_orig)) + (I-Ap(A))*x0_t_pixel
+                                """
                                 #x0_t_hat_pixel = x0_t_pixel
                                 x0_t_hat = codec.encode(x0_t_hat_pixel)
+                                _last_x0_t_hat_pixel = x0_t_hat_pixel.detach()
+
+                                # --- Per-step wandb diagnostics ---
+                                if _use_wandb:
+                                    _identity_err = F.mse_loss(codec.encode(x0_t_pixel), x0_t).item()
+                                    _correction_effect = F.mse_loss(x0_t_hat, x0_t).item()
+                                    _pixel_delta = F.mse_loss(x0_t_hat_pixel, x0_t_pixel).item()
+                                    _amplification = _correction_effect / max(_pixel_delta, 1e-8)
+                                    # Cosine: 1 extra decode
+                                    _decoded_new = codec.decode(x0_t_hat)
+                                    _delta_px = (x0_t_hat_pixel - x0_t_pixel).reshape(1, -1)
+                                    _delta_dec = (_decoded_new - x0_t_pixel).reshape(1, -1)
+                                    _cosine = F.cosine_similarity(_delta_px, _delta_dec).item()
+                                    _range_before = F.mse_loss(A(x0_t_pixel), y).item()
+                                    _range_after = F.mse_loss(A(x0_t_hat_pixel), y).item()
+                                    _psnr_before = _calc_psnr_neg11(x0_t_pixel, x_orig)
+                                    _psnr_after = _calc_psnr_neg11(x0_t_hat_pixel, x_orig)
+                                    _all_cosines.append(_cosine)
+                                    _all_amplifications.append(_amplification)
+                                    _img_tag = f"{_wb_prefix}/img_{idx_so_far}"
+                                    wandb.log({
+                                        f"{_img_tag}/MSE(encode(x0_t_pixel), x0_t)": _identity_err,
+                                        f"{_img_tag}/MSE(x0_t_hat, x0_t)": _correction_effect,
+                                        f"{_img_tag}/MSE(x0_t_hat_pixel, x0_t_pixel)": _pixel_delta,
+                                        f"{_img_tag}/MSE(x0_t_hat,x0_t) / MSE(x0_t_hat_pixel,x0_t_pixel)": _amplification,
+                                        f"{_img_tag}/cosine(x0_t_hat_pixel-x0_t_pixel, decode(x0_t_hat)-x0_t_pixel)": _cosine,
+                                        f"{_img_tag}/MSE(A(x0_t_pixel), y)": _range_before,
+                                        f"{_img_tag}/MSE(A(x0_t_hat_pixel), y)": _range_after,
+                                        f"{_img_tag}/PSNR(x0_t_pixel, x_orig)": _psnr_before,
+                                        f"{_img_tag}/PSNR(x0_t_hat_pixel, x_orig)": _psnr_after,
+                                        f"{_img_tag}/step_count": step_count,
+                                    })
                         else:
                             x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
 
@@ -540,13 +604,112 @@ class Diffusion(object):
                 psnr = 10 * torch.log10(1 / mse)
                 avg_psnr += psnr
 
+            # --- Per-image wandb diagnostics ---
+            if _use_wandb and is_latent:
+                with torch.no_grad():
+                    _final_decoded = codec.decode(xs[-1].to(self.device)).clamp(-1, 1)
+                    _final_psnr = _calc_psnr_neg11(_final_decoded, x_orig)
+
+                    # Oracle: pixel-space BP result
+                    _oracle_psnr = _calc_psnr_neg11(_last_x0_t_hat_pixel, x_orig) if _last_x0_t_hat_pixel is not None else float('nan')
+                    _codec_cost = _oracle_psnr - _final_psnr if _last_x0_t_hat_pixel is not None else 0.0
+
+                    # Range vs Null decomposition
+                    _x_final_dt = _final_decoded
+                    if args.deg == 'sr_averagepooling':
+                        _range_mse = F.mse_loss(A(_x_final_dt), A(x_orig)).item()
+                        _null_mse = F.mse_loss(
+                            _x_final_dt - Ap(A(_x_final_dt)),
+                            x_orig - Ap(A(x_orig))
+                        ).item()
+                    elif args.deg == 'inpainting':
+                        loaded_mask = np.load("exp/inp_masks/mask.npy")
+                        _m = torch.from_numpy(loaded_mask).to(self.device)
+                        if _m.shape[-1] != img_size:
+                            _m = torch.nn.functional.interpolate(
+                                _m.unsqueeze(0).unsqueeze(0).float(),
+                                size=(img_size, img_size), mode='nearest'
+                            ).squeeze(0).squeeze(0).to(_m.dtype)
+                        _range_mse = F.mse_loss(_m * _x_final_dt, _m * x_orig).item()
+                        _null_mse = F.mse_loss((1 - _m) * _x_final_dt, (1 - _m) * x_orig).item()
+                    else:
+                        _range_mse = F.mse_loss(_x_final_dt, x_orig).item()
+                        _null_mse = 0.0
+                    _total_mse = _range_mse + _null_mse
+                    _range_pct = 100 * _range_mse / max(_total_mse, 1e-8)
+                    _null_pct = 100 * _null_mse / max(_total_mse, 1e-8)
+
+                    # Codec roundtrip floor: decode(encode(x_orig))
+                    _z_gt = codec.encode(x_orig)
+                    _x_gt_rt = codec.decode(_z_gt)
+                    _codec_floor_psnr = _calc_psnr_neg11(_x_gt_rt, x_orig)
+                    if args.deg == 'sr_averagepooling':
+                        _null_floor_mse = F.mse_loss(
+                            _x_gt_rt - Ap(A(_x_gt_rt)),
+                            x_orig - Ap(A(x_orig))
+                        ).item()
+                    elif args.deg == 'inpainting':
+                        _null_floor_mse = F.mse_loss((1 - _m) * _x_gt_rt, (1 - _m) * x_orig).item()
+                    else:
+                        _null_floor_mse = F.mse_loss(_x_gt_rt, x_orig).item()
+                    _unet_gap = _null_mse - _null_floor_mse
+                    _unet_gap_pct = 100 * _unet_gap / max(_null_mse, 1e-8)
+
+                    _all_codec_costs.append(_codec_cost)
+                    _all_codec_floors.append(_codec_floor_psnr)
+                    _all_range_mses.append(_range_mse)
+                    _all_null_mses.append(_null_mse)
+
+                    # Visual comparison: x_orig | decode(encode(x_orig)) | decode(xs[-1]) | x0_t_hat_pixel
+                    _vis_orig = inverse_data_transform(config, x_orig[0:1]).cpu()
+                    _vis_rt = inverse_data_transform(config, _x_gt_rt[0:1].clamp(-1, 1)).cpu()
+                    _vis_result = inverse_data_transform(config, _final_decoded[0:1]).cpu()
+                    if _last_x0_t_hat_pixel is not None:
+                        _vis_bp_pixel = inverse_data_transform(config, _last_x0_t_hat_pixel[0:1].clamp(-1, 1)).cpu()
+                    else:
+                        _vis_bp_pixel = _vis_result  # fallback
+                    _vis_grid = torch.cat([_vis_orig, _vis_rt, _vis_result, _vis_bp_pixel], dim=0)
+                    _vis_grid = tvu.make_grid(_vis_grid, nrow=4, padding=4, pad_value=1.0)
+
+                    _img_tag = f"{_wb_prefix}/img_{idx_so_far}"
+                    wandb.log({
+                        f"{_img_tag}/PSNR(decode(xs[-1]), x_orig)": _final_psnr,
+                        f"{_img_tag}/PSNR(last_x0_t_hat_pixel, x_orig)": _oracle_psnr,
+                        f"{_img_tag}/oracle_minus_final_psnr": _codec_cost,
+                        f"{_img_tag}/MSE(A(x_final), A(x_orig))": _range_mse,
+                        f"{_img_tag}/MSE(x_final-Ap(A(x_final)), x_orig-Ap(A(x_orig)))": _null_mse,
+                        f"{_img_tag}/MSE(A(x_final),A(x_orig)) / total_mse * 100": _range_pct,
+                        f"{_img_tag}/MSE(x_final-Ap(A(x_final)),x_orig-Ap(A(x_orig))) / total_mse * 100": _null_pct,
+                        f"{_img_tag}/PSNR(decode(encode(x_orig)), x_orig)": _codec_floor_psnr,
+                        f"{_img_tag}/MSE((decode(encode(x_orig))-Ap(A(...))), (x_orig-Ap(A(...))))": _null_floor_mse,
+                        f"{_img_tag}/null_mse - null_floor_mse": _unet_gap,
+                        f"{_img_tag}/(null_mse - null_floor_mse) / null_mse * 100": _unet_gap_pct,
+                        f"{_img_tag}/x_orig | decode(encode(x_orig)) | decode(xs[-1]) | x0_t_hat_pixel": wandb.Image(
+                            _vis_grid,
+                            caption=f"x_orig | decode(encode(x_orig)) PSNR={_codec_floor_psnr:.1f} | decode(xs[-1]) PSNR={_final_psnr:.1f} | x0_t_hat_pixel PSNR={_oracle_psnr:.1f}"
+                        ),
+                    })
+
             idx_so_far += y.shape[0]
 
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
-        print("Total Average PSNR: %.2f" % avg_psnr)
-        print("Number of samples: %d" % (idx_so_far - idx_init))
+        tag = f"[{codec_name}] " if codec_name else ""
+        print("%sTotal Average PSNR: %.2f" % (tag, avg_psnr))
+        print("%sNumber of samples: %d" % (tag, idx_so_far - idx_init))
+
+        # --- Summary wandb diagnostics (uncomment when running on many images) ---
+        # if _use_wandb and _all_cosines:
+        #     wandb.log({
+        #         f"{_wb_prefix}/summary/mean_PSNR": avg_psnr.item() if torch.is_tensor(avg_psnr) else avg_psnr,
+        #         f"{_wb_prefix}/summary/mean_MSE(A(x_final),A(x_orig))": np.mean(_all_range_mses),
+        #         f"{_wb_prefix}/summary/mean_MSE(x_final-Ap(A(x_final)),x_orig-Ap(A(x_orig)))": np.mean(_all_null_mses),
+        #         f"{_wb_prefix}/summary/mean_oracle_minus_final_psnr": np.mean(_all_codec_costs),
+        #         f"{_wb_prefix}/summary/mean_PSNR(decode(encode(x_orig)),x_orig)": np.mean(_all_codec_floors),
+        #         f"{_wb_prefix}/summary/median_cosine": np.median(_all_cosines),
+        #         f"{_wb_prefix}/summary/median_MSE(x0_t_hat,x0_t)/MSE(x0_t_hat_pixel,x0_t_pixel)": np.median(_all_amplifications),
+        #     })
         
         
 
