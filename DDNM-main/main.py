@@ -114,6 +114,23 @@ def parse_args_and_config():
         "--bp_start", type=float, default=0.0,
         help="Start BP after this fraction of steps (e.g. 0.3 = skip BP in first 30%% of steps)"
     )
+    parser.add_argument(
+        "--pixel_init_bp",
+        action="store_true",
+        help="Init latent noise via pixel-space BP + single encode (measurement-consistent "
+             "warm start; skips step-T BP roundtrip since it's already done in pixel space)."
+    )
+    parser.add_argument(
+        "--run_name", type=str, default=None,
+        help="Name for the wandb run (defaults to wandb auto-generated)."
+    )
+    parser.add_argument(
+        "--debug_traj",
+        action="store_true",
+        help="Per-step trajectory logging to wandb for the first image: x0_t + x0_t_hat images at "
+             "every step, mask-split PSNRs (masked vs unmasked region), and latent stats. Expensive; "
+             "use with --subset_end 1."
+    )
 
     args = parser.parse_args()
 
@@ -199,6 +216,7 @@ def main():
         import wandb
         wandb.init(
             project="ddnm-diagnostics",
+            name=args.run_name,
             config={
                 "config": args.config,
                 "deg": args.deg,
@@ -210,6 +228,8 @@ def main():
                 "bp_every": getattr(args, 'bp_every', 1),
                 "bp_stop": getattr(args, 'bp_stop', 1.0),
                 "bp_start": getattr(args, 'bp_start', 0.0),
+                "pixel_init_bp": getattr(args, 'pixel_init_bp', False),
+                "debug_traj": getattr(args, 'debug_traj', False),
             },
         )
         print(f"wandb initialized: {wandb.run.url}")
@@ -223,6 +243,7 @@ def main():
         runner.sample(args.simplified)
     except Exception:
         logging.error(traceback.format_exc())
+        raise
 
     return 0
 

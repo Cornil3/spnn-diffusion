@@ -35,6 +35,14 @@ def parse_args():
     parser.add_argument("--mix_type", type=str, default="cayley", choices=["cayley", "householder"])
     parser.add_argument("--hidden", type=int, default=128)
     parser.add_argument("--scale_bound", type=float, default=2.0)
+    parser.add_argument("--num_blocks", type=int, default=2, choices=[1, 2],
+                        help="Number of ConvPINN blocks (2=default 3->48->16->64->4 chain, "
+                             "1=single-shuffle-then-couple: 3->192->4).")
+    parser.add_argument("--deep_convmlp", action="store_true",
+                        help="Use the deep U-Net inner block (ported from models_deep.py) "
+                             "for s/t/r nets. 4-level with concat skips: feat → feat/2 → feat/4 "
+                             "→ feat/8 bottleneck → feat/4 → feat/2 → feat. Default: shallow "
+                             "single-downsample U-Net (bottleneck at feat/2).")
 
     parser.add_argument("--lambda_decoder_distill", type=float, default=1.0,
                         help="Weight of decoder distillation loss (match VAE output)")
@@ -48,6 +56,14 @@ def parse_args():
                         help="Weight of roundtrip/pseudo-inverse stability loss (0 to disable)")
     parser.add_argument("--lambda_align", type=float, default=0.1,
                         help="Weight of latent alignment loss (0 to disable)")
+    parser.add_argument("--lambda_perturb", type=float, default=0.0,
+                        help="Weight of perturbation-consistency loss: dec(enc(dec(z_vae)+δ)) "
+                             "≈ dec(z_vae)+δ for random pixel-space δ. Trains the codec to "
+                             "preserve off-manifold perturbations (the operation DDNM does each "
+                             "step). Addresses local Jacobian consistency that plain roundtrip "
+                             "loss only partially covers.")
+    parser.add_argument("--perturb_std", type=float, default=0.1,
+                        help="Std of the pixel-space Gaussian perturbation for --lambda_perturb.")
 
     # ── Train args ──
     parser.add_argument("--batch_size", type=int, default=16)
@@ -55,7 +71,14 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="Max gradient norm for clipping (0 to disable)")
-    parser.add_argument("--save_every", type=int, default=50)
+    parser.add_argument("--save_every", type=int, default=50,
+                        help="Save numbered checkpoint (spnn_vae_epoch{N}.pt) every N epochs.")
+    parser.add_argument("--penrose_every", type=int, default=None,
+                        help="Run Penrose identity + cycle-grid checks every N epochs "
+                             "(default: same as --save_every). Set smaller than save_every "
+                             "for frequent quality tracking without disk-heavy checkpointing.")
+    parser.add_argument("--penrose_threshold", type=float, default=1e-7,
+                        help="Log a WARN marker if any Penrose identity MSE exceeds this.")
     parser.add_argument("--penrose_batch_size", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--max_images", type=int, default=None)
@@ -83,6 +106,8 @@ def parse_args():
 
     if args.checkpoint is None:
         args.checkpoint = os.path.join(args.output_dir, "spnn_vae_final.pt")
+    if args.penrose_every is None:
+        args.penrose_every = args.save_every
 
     # ── Dynamic wandb run name ──
     mode = "+".join(filter(None, ["train" if args.train else None, "test" if args.test else None]))
@@ -119,7 +144,9 @@ def run_latent_diagnostics(args):
 
     # Load SPNN
     print(f"Loading SPNN from {args.checkpoint}...")
-    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden, scale_bound=args.scale_bound)
+    spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden, r_hidden=args.hidden,
+                           scale_bound=args.scale_bound, num_blocks=args.num_blocks,
+                           use_deep_convmlp=args.deep_convmlp)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)
     if "model_state_dict" in state:
         state = state["model_state_dict"]

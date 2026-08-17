@@ -172,7 +172,9 @@ def train(args):
         vae = load_sd_vae(device, verbose=is_main)
     spnn = SPNNAutoencoder(mix_type=args.mix_type, hidden=args.hidden,
                            r_hidden=args.hidden,
-                           scale_bound=args.scale_bound).to(device)
+                           scale_bound=args.scale_bound,
+                           num_blocks=args.num_blocks,
+                           use_deep_convmlp=args.deep_convmlp).to(device)
 
     total_params = sum(p.numel() for p in spnn.parameters())
     if is_main:
@@ -305,12 +307,25 @@ def train(args):
                     z_vae = vae.encode(images).latent_dist.mode()
                 align_loss = mse_loss(z_spnn, z_vae)
 
+            # ── Perturbation consistency: dec(enc(dec(z_vae)+δ)) ≈ dec(z_vae)+δ ──
+            # Simulates what DDNM does per step (BP correction on decoded latents).
+            # Enforces smooth local invertibility of enc∘dec off the training manifold.
+            perturb_loss = torch.tensor(0.0, device=device)
+            if getattr(args, 'lambda_perturb', 0.0) > 0:
+                x_start = spnn_decoded.detach()
+                delta = torch.randn_like(x_start) * args.perturb_std
+                x_perturbed = x_start + delta
+                z_reencoded = unwrapped.encode(x_perturbed)
+                x_recovered = unwrapped.decode(z_reencoded)
+                perturb_loss = mse_loss(x_recovered, x_perturbed)
+
             loss = (args.lambda_decoder_distill * decoder_distill_loss
                     + args.lambda_decoder_gt * decoder_gt_loss
                     + args.lambda_lpips * lpips_loss
                     + args.lambda_cycle * cycle_loss
                     + args.lambda_roundtrip * roundtrip_loss
-                    + args.lambda_align * align_loss)
+                    + args.lambda_align * align_loss
+                    + getattr(args, 'lambda_perturb', 0.0) * perturb_loss)
 
             optimizer.zero_grad()
             accelerator.backward(loss)
@@ -339,6 +354,7 @@ def train(args):
                     "train/cycle_loss": cycle_loss.item(),
                     "train/roundtrip_loss": roundtrip_loss.item(),
                     "train/align_loss": align_loss.item(),
+                    "train/perturb_loss": perturb_loss.item(),
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
                 }
@@ -368,8 +384,9 @@ def train(args):
                 torch.save(ckpt_dict, best_ckpt_path)
                 print(f"  New best loss: {avg_loss:.6f} — saved: {best_ckpt_path}")
 
-        # ── Penrose + roundtrip checks (rank 0 only) ──
-        if epoch % args.save_every == 0 and is_main:
+        # ── Penrose identity + cycle-grid checks (rank 0 only) ──
+        penrose_every = getattr(args, 'penrose_every', args.save_every)
+        if epoch % penrose_every == 0 and is_main:
             unwrapped_spnn = accelerator.unwrap_model(spnn)
             # Sample a fresh random batch each time
             penrose_loader = DataLoader(
@@ -388,6 +405,18 @@ def train(args):
             torch.cuda.empty_cache()
             p_metrics = penrose_check(unwrapped_spnn, penrose_images, penrose_latent, device)
             print_penrose_metrics(p_metrics)
+
+            # Threshold-based pass/fail markers for the 3 pseudo-inverse identities
+            threshold = getattr(args, 'penrose_threshold', 1e-7)
+            penrose_id_keys = ["penrose/ggg_eq_g", "penrose/gpggp_eq_gp", "penrose/ggp_eq_id"]
+            n_fail = 0
+            for key in penrose_id_keys:
+                val = p_metrics[key]
+                marker = "[OK]" if val <= threshold else "[WARN]"
+                if val > threshold:
+                    n_fail += 1
+                print(f"  {marker} {key} = {val:.2e}  (target: <= {threshold:.0e})")
+            p_metrics["penrose/n_identities_above_threshold"] = n_fail
             wandb.log({**p_metrics, "epoch": epoch})
 
             # Save cycle consistency grid (5 encode→decode cycles)
@@ -397,6 +426,9 @@ def train(args):
 
             spnn.train()
 
+        # ── Numbered checkpoint save (rank 0 only, less frequent than penrose check) ──
+        if epoch % args.save_every == 0 and is_main:
+            unwrapped_spnn = accelerator.unwrap_model(spnn)
             ckpt_path = os.path.join(args.output_dir, f"spnn_vae_epoch{epoch:03d}.pt")
             ckpt_dict = {
                 "epoch": epoch,

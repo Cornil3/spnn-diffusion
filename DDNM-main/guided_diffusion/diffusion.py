@@ -277,6 +277,7 @@ class Diffusion(object):
         # get degradation operator (always in pixel space)
         print("args.deg:",args.deg)
         img_size = config.data.image_size
+        _inpaint_mask = None  # set in the 'inpainting' branch below; used by debug_traj logging
         if args.deg =='colorization':
             A = lambda z: color2gray(z)
             Ap = lambda z: gray2color(z)
@@ -297,6 +298,7 @@ class Diffusion(object):
                 ).squeeze(0).squeeze(0).to(mask.dtype)
             A = lambda z: z*mask
             Ap = A
+            _inpaint_mask = mask  # keep accessible at outer scope for debug_traj
         elif args.deg =='mask_color_sr':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
@@ -348,6 +350,7 @@ class Diffusion(object):
             _use_wandb = wandb.run is not None
         except ImportError:
             _use_wandb = False
+        _debug_traj = _use_wandb and getattr(args, 'debug_traj', False)
         if _use_wandb:
             _wb_prefix = codec_name if codec_name else "pixel"
             _all_cosines = []
@@ -377,21 +380,41 @@ class Diffusion(object):
             save_subfolder = f"Apy_{codec_name}" if codec_name else "Apy"
             os.makedirs(os.path.join(self.args.image_folder, save_subfolder), exist_ok=True)
             for i in range(len(Apy)):
+                _apy_norm = inverse_data_transform(config, Apy[i])
+                _orig_norm = inverse_data_transform(config, x_orig[i])
                 tvu.save_image(
-                    inverse_data_transform(config, Apy[i]),
+                    _apy_norm,
                     os.path.join(self.args.image_folder, f"{save_subfolder}/Apy_{idx_so_far + i}.png")
                 )
                 tvu.save_image(
-                    inverse_data_transform(config, x_orig[i]),
+                    _orig_norm,
                     os.path.join(self.args.image_folder, f"{save_subfolder}/orig_{idx_so_far + i}.png")
                 )
+                if _use_wandb:
+                    _img_tag = f"{_wb_prefix}/img_{idx_so_far + i}"
+                    wandb.log({
+                        f"{_img_tag}/Apy": wandb.Image(_apy_norm.cpu(), caption=f"Ap(y) — {args.deg}"),
+                        f"{_img_tag}/orig": wandb.Image(_orig_norm.cpu(), caption="x_orig"),
+                    })
 
             # init noise — latent shape for latent mode, pixel shape for pixel mode
+            pixel_init_used = is_latent and getattr(args, 'pixel_init_bp', False)
             if is_latent:
-                x = torch.randn(
-                    y.shape[0], latent_shape[0], latent_shape[1], latent_shape[2],
-                    device=self.device,
-                )
+                if pixel_init_used:
+                    # Init in pixel space, apply DDNM projection (lambda=1),
+                    # then encode once. Range component becomes exactly Ap(y);
+                    # null-space stays as noise. Skips the step-T BP roundtrip.
+                    x_pixel = torch.randn(
+                        y.shape[0], config.data.channels, img_size, img_size,
+                        device=self.device,
+                    )
+                    x_pixel = x_pixel - Ap(A(x_pixel) - y)
+                    x = codec.encode(x_pixel)
+                else:
+                    x = torch.randn(
+                        y.shape[0], latent_shape[0], latent_shape[1], latent_shape[2],
+                        device=self.device,
+                    )
             else:
                 x = torch.randn(
                     y.shape[0], config.data.channels, img_size, img_size,
@@ -462,7 +485,7 @@ class Diffusion(object):
                         # Tweedie: estimate clean sample
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        lambda_t = 0.0625
+                        lambda_t = 1.0
                         bp_stop_pct = getattr(args, 'bp_stop', 1.0)
                         bp_start_pct = getattr(args, 'bp_start', 0.0)
                         if is_latent:
@@ -470,6 +493,9 @@ class Diffusion(object):
                             bp_past_stop = step_count > total_steps * bp_stop_pct
                             bp_before_start = step_count < total_steps * bp_start_pct
                             do_bp = (step_count % freq == 0) and not bp_past_stop and not bp_before_start
+                            # Skip step-T BP if the pixel-space init already did it
+                            if pixel_init_used and step_count == 1:
+                                do_bp = False
                             if not do_bp:
                                 x0_t_hat = x0_t
                                 x0_t_hat_pixel = None
@@ -517,6 +543,51 @@ class Diffusion(object):
                                     })
                         else:
                             x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
+
+                        # --- Per-step trajectory logging (opt-in via --debug_traj) ---
+                        # For the FIRST image only. Logs x0_t and x0_t_hat as pixel images
+                        # plus mask-split PSNRs so we can see when/where the trajectory diverges.
+                        if _debug_traj and (idx_so_far - idx_init) == 0 and is_latent:
+                            with torch.no_grad():
+                                _x0t_pixel_dbg = codec.decode(x0_t)  # always decode (BP might have skipped this)
+                                _psnr_full = _calc_psnr_neg11(_x0t_pixel_dbg, x_orig)
+                                # Codec roundtrip identity check: encode(decode(z)) == z should hold for SPNN.
+                                # If it drifts, that's compounding error over the trajectory.
+                                _z_rt = codec.encode(_x0t_pixel_dbg)
+                                _rt_id_mse = F.mse_loss(_z_rt, x0_t).item()
+                                # Also compare against x0_t magnitude to get a scale-relative view
+                                _x0t_l2 = (x0_t ** 2).mean().item()
+                                _rt_id_relmse = _rt_id_mse / max(_x0t_l2, 1e-12)
+                                _traj = {
+                                    f"{_wb_prefix}/traj/step_count": step_count,
+                                    f"{_wb_prefix}/traj/alpha_t": at.mean().item(),
+                                    f"{_wb_prefix}/traj/psnr_x0_t_full": _psnr_full,
+                                    f"{_wb_prefix}/traj/latent_x0_t_mean": x0_t.mean().item(),
+                                    f"{_wb_prefix}/traj/latent_x0_t_std": x0_t.std().item(),
+                                    f"{_wb_prefix}/traj/latent_x0_t_absmax": x0_t.abs().max().item(),
+                                    f"{_wb_prefix}/traj/roundtrip_id_MSE": _rt_id_mse,
+                                    f"{_wb_prefix}/traj/roundtrip_id_relMSE": _rt_id_relmse,
+                                    f"{_wb_prefix}/traj/bp_applied": 1 if x0_t_hat_pixel is not None else 0,
+                                }
+                                if _inpaint_mask is not None:
+                                    m = _inpaint_mask
+                                    n_um = (1 - m).sum().item() * _x0t_pixel_dbg.size(1)
+                                    n_ob = m.sum().item() * _x0t_pixel_dbg.size(1)
+                                    _mse_um = (((_x0t_pixel_dbg - x_orig) * (1 - m)) ** 2).sum().item() / max(n_um, 1)
+                                    _mse_ob = (((_x0t_pixel_dbg - x_orig) * m) ** 2).sum().item() / max(n_ob, 1)
+                                    _traj[f"{_wb_prefix}/traj/psnr_x0_t_hallucinated_region"] = 10 * math.log10(4.0 / max(_mse_um, 1e-12))
+                                    _traj[f"{_wb_prefix}/traj/psnr_x0_t_observed_region"] = 10 * math.log10(4.0 / max(_mse_ob, 1e-12))
+                                _x0t_img = inverse_data_transform(config, _x0t_pixel_dbg[0].clamp(-1, 1)).cpu()
+                                _traj[f"{_wb_prefix}/traj/x0_t_pixel"] = wandb.Image(
+                                    _x0t_img, caption=f"x0_t @ step {step_count}, PSNR={_psnr_full:.2f}"
+                                )
+                                if x0_t_hat_pixel is not None:
+                                    _psnr_hat = _calc_psnr_neg11(x0_t_hat_pixel, x_orig)
+                                    _xhat_img = inverse_data_transform(config, x0_t_hat_pixel[0].clamp(-1, 1)).cpu()
+                                    _traj[f"{_wb_prefix}/traj/x0_t_hat_pixel"] = wandb.Image(
+                                        _xhat_img, caption=f"x0_t_hat @ step {step_count}, PSNR={_psnr_hat:.2f}"
+                                    )
+                                wandb.log(_traj)
 
                         # DDIM step with configurable eta (0=deterministic, 1=full stochastic)
                         eta = getattr(args, 'eta', 0.0)
@@ -603,6 +674,14 @@ class Diffusion(object):
                 mse = torch.mean((x[0][jj].to(self.device) - orig) ** 2)
                 psnr = 10 * torch.log10(1 / mse)
                 avg_psnr += psnr
+                if _use_wandb:
+                    _img_tag = f"{_wb_prefix}/img_{idx_so_far + jj}"
+                    wandb.log({
+                        f"{_img_tag}/reconstruction": wandb.Image(
+                            x[0][jj].cpu(), caption=f"reconstruction, PSNR={psnr.item():.2f} dB"
+                        ),
+                        f"{_img_tag}/psnr": psnr.item(),
+                    })
 
             # --- Per-image wandb diagnostics ---
             if _use_wandb and is_latent:
@@ -699,17 +778,22 @@ class Diffusion(object):
         print("%sTotal Average PSNR: %.2f" % (tag, avg_psnr))
         print("%sNumber of samples: %d" % (tag, idx_so_far - idx_init))
 
-        # --- Summary wandb diagnostics (uncomment when running on many images) ---
-        # if _use_wandb and _all_cosines:
-        #     wandb.log({
-        #         f"{_wb_prefix}/summary/mean_PSNR": avg_psnr.item() if torch.is_tensor(avg_psnr) else avg_psnr,
-        #         f"{_wb_prefix}/summary/mean_MSE(A(x_final),A(x_orig))": np.mean(_all_range_mses),
-        #         f"{_wb_prefix}/summary/mean_MSE(x_final-Ap(A(x_final)),x_orig-Ap(A(x_orig)))": np.mean(_all_null_mses),
-        #         f"{_wb_prefix}/summary/mean_oracle_minus_final_psnr": np.mean(_all_codec_costs),
-        #         f"{_wb_prefix}/summary/mean_PSNR(decode(encode(x_orig)),x_orig)": np.mean(_all_codec_floors),
-        #         f"{_wb_prefix}/summary/median_cosine": np.median(_all_cosines),
-        #         f"{_wb_prefix}/summary/median_MSE(x0_t_hat,x0_t)/MSE(x0_t_hat_pixel,x0_t_pixel)": np.median(_all_amplifications),
-        #     })
+        # --- Run-level summary in wandb ---
+        if _use_wandb:
+            _avg = avg_psnr.item() if torch.is_tensor(avg_psnr) else float(avg_psnr)
+            _summary = {
+                f"{_wb_prefix}/summary/mean_PSNR": _avg,
+                f"{_wb_prefix}/summary/n_samples": idx_so_far - idx_init,
+            }
+            if _all_range_mses:
+                _summary[f"{_wb_prefix}/summary/mean_range_MSE"] = float(np.mean(_all_range_mses))
+                _summary[f"{_wb_prefix}/summary/mean_null_MSE"] = float(np.mean(_all_null_mses))
+                _summary[f"{_wb_prefix}/summary/mean_codec_floor_PSNR"] = float(np.mean(_all_codec_floors))
+                _summary[f"{_wb_prefix}/summary/mean_oracle_minus_final_PSNR"] = float(np.mean(_all_codec_costs))
+            if _all_cosines:
+                _summary[f"{_wb_prefix}/summary/median_cosine"] = float(np.median(_all_cosines))
+                _summary[f"{_wb_prefix}/summary/median_amplification"] = float(np.median(_all_amplifications))
+            wandb.log(_summary)
         
         
 
