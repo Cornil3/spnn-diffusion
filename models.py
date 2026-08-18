@@ -247,13 +247,12 @@ class ConvMLP(nn.Module):
             x = self.net.expand(B, self.out_ch, H, W)
 
         if self.scale_bound is not None:
+            # s-network: bounded scaling factor, then exp() so s(neg=True) = 1/s(neg=False) exactly.
             x = torch.tanh(x) * self.scale_bound
             if neg:
                 x = -x
             x = x.exp()
-        else:
-            x = torch.tanh(x)
-            #x = x
+        # t and r networks: unbounded output (standard practice in coupling layers).
         return x
 
 
