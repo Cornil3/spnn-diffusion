@@ -1,0 +1,76 @@
+# Latent-space DDNM: SD1.5 UNet prior + {SD KL-VAE, SPNN-512} codec, 512x512 inpainting.
+#
+# Run from DDNM-main-scartch/ (inside the pytorch container, with diffusers+transformers):
+#   python main.py --config sd15_inpaint_latent.yml --deg inpainting --ni -i myrun
+#
+# codec.type == "spnn" runs BOTH codecs (VAE then SPNN) so you get a head-to-head PSNR.
+data:
+    dataset: "imagenet"
+    # ImageFolder root: must contain a class subfolder of images (here exp/datasets/imagenet/imagenet/*).
+    dataset_root: "exp/datasets/imagenet"
+    image_size: 512
+    channels: 3
+    num_workers: 0
+
+model:
+    type: "latent_sd15"                       # dispatches main.py to the latent runner
+    sd15_id: "runwayml/stable-diffusion-v1-5"
+    repo_root: ".."                           # simple-latent-diffusion-model root (spnn_model.py + runs/ ckpts)
+    var_type: fixedsmall
+    guidance_scale: 1.0                        # 1.0 = unconditional (empty prompt, CFG off)
+
+codec:
+    type: "spnn"                              # "vae" = VAE only | "spnn" = VAE + SPNN-512 (compared)
+    spnn_class: "SPNNAutoencoder512"
+    spnn_checkpoint: "runs/spnn512_sd15_distill/ckpt_last.pt"
+    spnn_mix_type: "householder"              # MUST match training
+    spnn_hidden: 128
+    spnn_r_hidden: 256
+    spnn_scale_bound: 1.0                     # MUST match training
+    spnn_use_ema: true
+    # spnn_external_scale: null               # leave unset: SPNN-512 is prescaled into SD's latent space
+
+diffusion:
+    # SD1.5 'scaled_linear' schedule (== the original DDNM get_beta_schedule 'quad').
+    beta_schedule: scaled_linear
+    num_diffusion_timesteps: 1000
+    beta_start: 0.00085
+    beta_end: 0.012
+
+sampling:
+    batch_size: 1
+
+time_travel:
+    T_sampling: 100                           # reverse-diffusion steps (skip = 1000 // T_sampling)
+    travel_length: 1                          # RePaint time-travel jump length (1 = off)
+    travel_repeat: 1                          # RePaint resampling repeats (1 = off)
+
+inpainting:
+    # Prefer a staged mask file (1=known, 0=hole); resized to image_size. Falls back to mask_kind if absent.
+    mask_path: "exp/inp_masks/mask.npy"
+    mask_kind: "box"                          # box | half | random  (used only if mask_path is missing)
+    mask_box_frac: 0.5                        # central hole side as a fraction of the image (box), or drop-prob (random)
+
+# ---------------------------------------------------------------------------------------
+# functions/latent_ddnm_converge.py. Defaults below reproduce latent_ddnm.py exactly,
+# except return_mode="x0hat" (drops one gratuitous D(E(.)) at the very end: VAE +0.25 dB,
+# SPNN unchanged). The consistency tail is OFF: measured over 6 images it degrades BOTH
+# codecs (SPNN 14.01 -> 13.16 dB hole PSNR at relax=1), and every damped setting that
+# actually converges scores at or below the no-tail gap. See the module docstring.
+converge:
+    tail_steps: 0           # UNet-free POCS tail x <- pin(D(E(x))). 0 = off. 25 widens the
+                            # SPNN-VAE gap (+3.56 -> +4.73 dB) only by degrading both codecs.
+    relax: 1.0              # tail Krasnoselskii-Mann averaging. <1 makes the tail converge,
+                            # but shrinks the gap (r=0.1: SPNN 14.04, VAE 11.04, gap +3.00).
+    relax_decay: 0.0        # >0 decays relax to 0 across the tail (change/step -> exactly 0)
+    schedule: "uniform"     # "uniform" = original DDNM spacing. "power" measured WORSE.
+    schedule_power: 3.0     # only used when schedule == "power"
+    eta: 0.85               # DDIM stochasticity
+    eta_final: null         # null = constant eta. Annealing to 0 was the worst change tested
+                            # (VAE -4.11 dB): the noise is what repairs codec damage.
+    lambda_tail: 1.0        # data-consistency strength inside the tail
+    tail_tol: 1.0e-3        # stop the tail when RMS change per step drops below this
+    x0_clamp: false         # measured no-op: the decoded x0 never exceeds ~1.2
+    legacy_gamma: true      # true = latent_ddnm.py's DDIM step. false = official DDNM
+                            # (svd_ddnm.py:63-65), which measured WORSE here (VAE -1.65 dB).
+    return_mode: "x0hat"    # "x0hat" (no trailing round trip) | "decode" = latent_ddnm.py
