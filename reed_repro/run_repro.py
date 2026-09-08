@@ -145,6 +145,7 @@ def generate(args):
             col_labels = ["source"] + [str(i) for i in range(1, MAX_ITERS + 1)]
 
             failures = []
+            consecutive = 0
             for n, s in enumerate(pending, 1):
                 try:
                     cur = s.source
@@ -174,7 +175,24 @@ def generate(args):
                     failures.append({"key": s.key, "error": repr(e),
                                      "trace": traceback.format_exc()[-2000:]})
                     print(f"  !! {s.key} failed: {e!r}")
+                    consecutive += 1
+                    # A full disk is not transient: every subsequent sample fails the
+                    # same way. Without this the loop spins through all 179 samples
+                    # holding a GPU at 0% utilisation -- observed once for 7 hours.
+                    # Generation is resumable, so aborting loses nothing.
+                    enospc = isinstance(e, OSError) and getattr(e, "errno", None) == 28
+                    if enospc:
+                        print(f"  ABORT: no space left on device. {len(failures)} samples "
+                              f"lost this run; rerun after freeing disk and it will "
+                              f"resume from what is already on disk.", flush=True)
+                        break
+                    if consecutive >= 5:
+                        print(f"  ABORT: {consecutive} consecutive failures — stopping "
+                              f"rather than burning the allocation. Last error: {e!r}",
+                              flush=True)
+                        break
                 else:
+                    consecutive = 0
                     # Outside the try: a wandb hiccup must not mark a good sample
                     # failed, and the PNGs are already safely on disk by here.
                     if run is not None:

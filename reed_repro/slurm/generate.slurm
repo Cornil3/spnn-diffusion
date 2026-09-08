@@ -43,6 +43,9 @@ CKPT=${CKPT:-imagenet_latent_ddnm/runs/spnn512_sd15_distill/ckpt_last.pt}
 WEIGHTS=${WEIGHTS:-ema}
 LATENT_SCALE=${LATENT_SCALE:-prescaled}
 
+# SNAPSHOTS_ONLY=1 keeps only iterations 1/5/15/25 instead of all 25.
+# Metrics are identical; only the wandb grids get sparser. ~4.5x less disk.
+SNAPSHOTS_ONLY=${SNAPSHOTS_ONLY:-0}
 SEED_MODE=${SEED_MODE:-varying}
 FIXED_SEED=${FIXED_SEED:-42}
 
@@ -50,5 +53,6 @@ ARGS=(--tag "$TAG" --models "$MODEL" --codecs "$CODEC"
       --spnn_checkpoint "$CKPT" --spnn_weights "$WEIGHTS" --latent_scale "$LATENT_SCALE"
       --seed_mode "$SEED_MODE" --fixed_seed "$FIXED_SEED")
 if [[ -n "${LIMIT:-}" ]]; then ARGS+=(--limit "$LIMIT"); fi
+if [[ "$SNAPSHOTS_ONLY" == "1" ]]; then ARGS+=(--snapshots_only); fi
 
 python -u -m reed_repro.run_repro generate "${ARGS[@]}"
