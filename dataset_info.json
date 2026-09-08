@@ -1,0 +1,123 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "mask_guided_image_editing",
+  "dataset_size": 2734811967,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/dev-00000-of-00004-e162115722f1be56.parquet": {
+      "num_bytes": 387494437,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/dev-00001-of-00004-d51ef97cecd37906.parquet": {
+      "num_bytes": 379917276,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/dev-00002-of-00004-e1736c6f52875d53.parquet": {
+      "num_bytes": 355967361,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/dev-00003-of-00004-93e3835eaca42171.parquet": {
+      "num_bytes": 397854145,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/filtered-00000-of-00002-719c41326f14b0d2.parquet": {
+      "num_bytes": 255827547,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/filtered-00001-of-00002-975ef8cddf0d1225.parquet": {
+      "num_bytes": 248154339,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/extra-00000-of-00002-d6262c36fbe53547.parquet": {
+      "num_bytes": 336667795,
+      "checksum": null
+    },
+    "hf://datasets/ImagenHub/Mask_Guided_Image_Editing@d04917bb6ec45e495005c5f790fe4ffc00e221cc/data/extra-00001-of-00002-01d286aeeede2fc3.parquet": {
+      "num_bytes": 372802891,
+      "checksum": null
+    }
+  },
+  "download_size": 2734685791,
+  "features": {
+    "img_id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "turn_index": {
+      "dtype": "int32",
+      "_type": "Value"
+    },
+    "source_img": {
+      "_type": "Image"
+    },
+    "mask_img": {
+      "_type": "Image"
+    },
+    "instruction": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "source_global_caption": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "target_global_caption": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "target_local_caption": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "target_img": {
+      "_type": "Image"
+    },
+    "processed_mask": {
+      "_type": "Image"
+    },
+    "reverse_instruction": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 5469497758,
+  "splits": {
+    "dev": {
+      "name": "dev",
+      "num_bytes": 1521309567,
+      "num_examples": 528,
+      "shard_lengths": [
+        232,
+        264,
+        32
+      ],
+      "dataset_name": "mask_guided_image_editing"
+    },
+    "filtered": {
+      "name": "filtered",
+      "num_bytes": 504018306,
+      "num_examples": 179,
+      "dataset_name": "mask_guided_image_editing"
+    },
+    "extra": {
+      "name": "extra",
+      "num_bytes": 709484094,
+      "num_examples": 249,
+      "shard_lengths": [
+        225,
+        24
+      ],
+      "dataset_name": "mask_guided_image_editing"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
