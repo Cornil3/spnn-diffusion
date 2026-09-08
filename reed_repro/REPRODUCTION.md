@@ -225,7 +225,30 @@ sbatch --export=ALL,TAG=full179 reed_repro/slurm/evaluate.slurm
 a re-submitted job skips any sample whose four snapshots already exist, so preemption
 costs only the in-flight sample.
 
-## The seed regime — why our k=5 initially disagreed with the paper
+## The seed regime — UNRESOLVED, hypothesis partly refuted
+
+> **Status (updated after the first full fixed-seed table).** The hypothesis below —
+> that REED looped over ImagenHub's `seed=42` default — was inferred from a probe that
+> measured **k=5 only**. PbE's full fixed-seed table now contradicts it:
+>
+> | PbE, vanilla | k=5 | k=15 | k=25 |
+> |---|---|---|---|
+> | paper | 0.020 | 0.040 | 0.070 |
+> | ours, **varying** seed | 0.019 | 0.044 | 0.070 |
+> | ours, **fixed 42** | 0.011 | 0.066 | 0.111 |
+>
+> The *varying* seed reproduces the paper across all three columns (LPIPS
+> 0.257/0.599/0.711 vs 0.260/0.600/0.710; FID 84.8/212.9/251.7 vs 83.5/209.3/253.6),
+> while fixed-42 buys k=5 and loses k=15/25, moving away from the paper on every metric.
+>
+> So a fixed seed is **not** established as REED's protocol, and the IP2P k=5 gap is
+> still unexplained. Await IP2P's fixed-seed table — the model the hypothesis was built
+> on — before concluding. What *is* robust: SPNN beats the baseline on all five metrics
+> at k=15 and k=25 under **both** regimes, so the headline result does not depend on
+> resolving this.
+
+### Original hypothesis and the k=5 measurement
+
 
 Our first full run used a **different seed per iteration**. Against the paper, IP2P and
 MagicBrush matched closely at k=15/25 but were clearly worse at k=5 (IP2P MSE 0.038 vs
