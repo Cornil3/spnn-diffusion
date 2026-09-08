@@ -13,15 +13,17 @@ cd /home/yamitehrlich/work/spnn-diffusion
 TAG=${TAG:-full179}
 CK=${CKPT:-imagenet_latent_ddnm/runs/spnn512_sd15_distill/ckpt_last.pt}
 MODELS=${1:-"magicbrush diffedit pbe sd_inpaint"}
+SEED_MODE=${SEED_MODE:-varying}
+FIXED_SEED=${FIXED_SEED:-42}
 
 sub() { sbatch --parsable "$@" 2>/dev/null | grep -oE '^[0-9]+' | head -1; }
 
 for m in $MODELS; do
   A=$(sub --job-name="reed_${m}_vae_${TAG}" \
-        --export=ALL,MODEL="$m",CODEC=vae,TAG="$TAG",CKPT="$CK",WEIGHTS=ema,LATENT_SCALE=prescaled \
+        --export=ALL,MODEL="$m",CODEC=vae,TAG="$TAG",CKPT="$CK",WEIGHTS=ema,LATENT_SCALE=prescaled,SEED_MODE="$SEED_MODE",FIXED_SEED="$FIXED_SEED" \
         reed_repro/slurm/generate.slurm)
   B=$(sub --job-name="reed_${m}_spnn_${TAG}" \
-        --export=ALL,MODEL="$m",CODEC=spnn,TAG="$TAG",CKPT="$CK",WEIGHTS=ema,LATENT_SCALE=prescaled \
+        --export=ALL,MODEL="$m",CODEC=spnn,TAG="$TAG",CKPT="$CK",WEIGHTS=ema,LATENT_SCALE=prescaled,SEED_MODE="$SEED_MODE",FIXED_SEED="$FIXED_SEED" \
         reed_repro/slurm/generate.slurm)
   E=$(sub --qos=24h_1g --dependency=afterok:"$A":"$B" --job-name="reed_eval_${m}_${TAG}" \
         --export=ALL,TAG="$TAG",MODELS="$m",PROJECT=reed-vae-repro \

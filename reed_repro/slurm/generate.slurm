@@ -43,8 +43,12 @@ CKPT=${CKPT:-imagenet_latent_ddnm/runs/spnn512_sd15_distill/ckpt_last.pt}
 WEIGHTS=${WEIGHTS:-ema}
 LATENT_SCALE=${LATENT_SCALE:-prescaled}
 
+SEED_MODE=${SEED_MODE:-varying}
+FIXED_SEED=${FIXED_SEED:-42}
+
 ARGS=(--tag "$TAG" --models "$MODEL" --codecs "$CODEC"
-      --spnn_checkpoint "$CKPT" --spnn_weights "$WEIGHTS" --latent_scale "$LATENT_SCALE")
+      --spnn_checkpoint "$CKPT" --spnn_weights "$WEIGHTS" --latent_scale "$LATENT_SCALE"
+      --seed_mode "$SEED_MODE" --fixed_seed "$FIXED_SEED")
 if [[ -n "${LIMIT:-}" ]]; then ARGS+=(--limit "$LIMIT"); fi
 
 python -u -m reed_repro.run_repro generate "${ARGS[@]}"

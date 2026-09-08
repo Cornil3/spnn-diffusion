@@ -129,6 +129,9 @@ def generate(args):
                                     extra_config={"params": editor.params,
                                                   "vae_source": editor.vae_source,
                                                   "imagenhub_api": editor.used_imagenhub,
+                    "seed_mode": args.seed_mode, "fixed_seed": args.fixed_seed,
+                                                  "seed_mode": args.seed_mode,
+                                                  "fixed_seed": args.fixed_seed,
                                                   "n_samples": len(samples),
                                                   "resolution": args.resolution,
                                                   "max_iters": MAX_ITERS,
@@ -150,8 +153,18 @@ def generate(args):
                         # ImagenHub's infer_one_image takes an int seed and calls
                         # torch.manual_seed itself, so we pass the seed rather than a
                         # Generator. Identical per (sample, iteration) across codecs,
-                        # so both arms see the same noise.
-                        cur = editor.edit(s, cur, it, seed_for(s.key, it))
+                        # so both arms always see the same noise.
+                        #
+                        # seed_mode="fixed" reuses one seed on EVERY iteration, which
+                        # is ImagenHub's infer_one_image default (seed=42). Measured:
+                        # under fixed 42 our IP2P k=5 lands on the paper (MSE 0.018 vs
+                        # 0.02, LPIPS 0.338 vs 0.33, SSIM 0.601 vs 0.60) whereas a
+                        # varying seed gives 0.034/0.374/0.556. EulerAncestral is
+                        # stochastic, so seed reuse makes the early chain far more
+                        # self-consistent; by k=15/25 both regimes converge.
+                        seed = (args.fixed_seed if args.seed_mode == "fixed"
+                                else seed_for(s.key, it))
+                        cur = editor.edit(s, cur, it, seed)
                         if cur.size != (args.resolution, args.resolution):
                             cur = cur.resize((args.resolution, args.resolution))
                         strip.append(cur)
@@ -203,6 +216,7 @@ def generate(args):
                     "params": editor.params, "resolution": args.resolution,
                     "vae_source": editor.vae_source,
                     "imagenhub_api": editor.used_imagenhub,
+                    "seed_mode": args.seed_mode, "fixed_seed": args.fixed_seed,
                     "resize_mode": args.resize_mode, "max_iters": MAX_ITERS,
                     "mask_open": args.mask_open, "mask_close": args.mask_close,
                     "from_disk": args.from_disk,
@@ -419,6 +433,13 @@ def main():
     ap.add_argument("--latent_scale", default="prescaled", choices=["prescaled", "raw"],
                     help="run verify_codec.py first; pass the regime it measures")
     ap.add_argument("--lpips_net", default="alex", choices=["alex", "vgg"])
+    ap.add_argument("--seed_mode", default="varying", choices=["varying", "fixed"],
+                    help="'varying': a different seed per iteration (methodologically "
+                         "cleaner). 'fixed': the same seed every iteration, which is "
+                         "ImagenHub's infer_one_image default and reproduces REED's "
+                         "k=5 numbers.")
+    ap.add_argument("--fixed_seed", type=int, default=42,
+                    help="seed used when --seed_mode fixed (ImagenHub's default is 42)")
     ap.add_argument("--save_all_iters", action="store_true", default=True,
                     help="write a PNG for every one of the 25 iterations (default). "
                          "Needed for the per-image iteration grids.")

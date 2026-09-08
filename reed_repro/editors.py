@@ -207,12 +207,15 @@ class DiffEditEditor(Editor):
         if self.used_imagenhub:
             return self.model.infer_one_image(src_image=image, src_prompt=src,
                                               target_prompt=tgt, seed=seed)
-        torch.manual_seed(seed)
+        # Match imagen_hub/infermodels/diffedit.py exactly: one generator from
+        # torch.manual_seed(seed), threaded through all three calls.
+        generator = torch.manual_seed(seed)
         img = image.convert("RGB")
-        mask = self.pipe.generate_mask(image=img, source_prompt=src, target_prompt=tgt)
-        inv = self.pipe.invert(prompt=src, image=img).latents
+        mask = self.pipe.generate_mask(image=img, source_prompt=src, target_prompt=tgt,
+                                       generator=generator)
+        inv = self.pipe.invert(prompt=src, image=img, generator=generator).latents
         return self.pipe(prompt=tgt, mask_image=mask, image_latents=inv,
-                         negative_prompt=src).images[0]
+                         generator=generator, negative_prompt=src).images[0]
 
 
 class SDInpaintEditor(Editor):

@@ -225,6 +225,45 @@ sbatch --export=ALL,TAG=full179 reed_repro/slurm/evaluate.slurm
 a re-submitted job skips any sample whose four snapshots already exist, so preemption
 costs only the in-flight sample.
 
+## The seed regime — why our k=5 initially disagreed with the paper
+
+Our first full run used a **different seed per iteration**. Against the paper, IP2P and
+MagicBrush matched closely at k=15/25 but were clearly worse at k=5 (IP2P MSE 0.038 vs
+0.02, PSNR 15.67 vs 17.78), while PbE and SD Inpainting matched throughout. A protocol
+error would corrupt all three columns; a *drift-rate* difference converges once both
+chains saturate — which is what we saw.
+
+Cause: ImagenHub's `infer_one_image` defaults to **`seed: int = 42`** (all of
+InstructPix2Pix, MagicBrush, DiffEdit and SDInpaint). Looping over it reuses that seed
+on every iteration. IP2P/MagicBrush run `EulerAncestralDiscreteScheduler`, which is
+*stochastic*, so seed reuse makes the early edit chain far more self-consistent. PbE and
+SD Inpainting use far less noise-sensitive schedulers, which is exactly why only the two
+EulerAncestral models showed the gap.
+
+Measured directly (`_seed_probe.py`, IP2P, 24 images, 5 iterations, seed the only
+variable):
+
+| regime | MSE | PSNR | LPIPS | SSIM |
+|---|---|---|---|---|
+| varying seed (our first run) | 0.0338 | 16.74 | 0.374 | 0.556 |
+| **fixed 42 (ImagenHub default)** | **0.0182** | **18.42** | **0.338** | **0.601** |
+| paper, vanilla IP2P @k=5 | 0.02 | 17.78 | 0.33 | 0.60 |
+| our full run @k=5 (n=179) | 0.038 | 15.67 | 0.40 | 0.55 |
+
+The varying arm on 24 images reproduces our 179-image result, so the subset is
+representative; the fixed-seed arm then lands on the paper on all four metrics at once.
+
+Both regimes are kept, under separate tags:
+
+    --seed_mode varying   ->  results/full179/         wandb: full179-<model>-<codec>
+    --seed_mode fixed     ->  results/full179_seed42/  wandb: full179_seed42-<model>-<codec>-j<jobid>
+
+`fixed` is what reproduces REED. `varying` is arguably the sounder measurement — reusing
+one seed correlates the noise across iterations and flatters early-iteration numbers. An
+SPNN advantage that holds under both is a stronger claim than one that holds under
+either. Both arms of a comparison always share the same seed at the same iteration, so
+the codec comparison stays controlled in either regime.
+
 ## Using ImagenHub's own code
 
 Everything that can come from ImagenHub does, because re-deriving their conventions is
