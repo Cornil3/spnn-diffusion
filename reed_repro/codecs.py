@@ -11,9 +11,11 @@ Latent scale
 `imagenet_latent_ddnm/DDNM-main-scratch/configs/sd15_inpaint_latent.yml` leaves
 `spnn_external_scale` unset with the note "SPNN-512 is prescaled into SD's latent
 space", i.e. spnn.encode(x) already carries SD's 0.18215 factor. Every diffusers
-pipeline, however, multiplies the encoder output by `vae.config.scaling_factor`
-itself. So in the `prescaled` regime this shim must divide it back out on encode and
-re-apply it on decode, or the UNet sees latents 5.5x too large.
+pipeline, however, applies that factor itself -- multiplying after encode, dividing
+before decode. So in the `prescaled` regime this shim must divide it back out on
+encode and re-apply it on decode, or the factor lands twice in each direction:
+the UNet would get latents 5.5x too SMALL (z*sf instead of z), and spnn.decode would
+get latents 5.5x too LARGE (z/sf instead of z).
 
 Getting this backwards silently poisons every number in the table, so
 `verify_codec.py` measures which regime the checkpoint is actually in rather than
