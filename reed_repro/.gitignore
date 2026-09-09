@@ -1,3 +1,4 @@
 results/
 __pycache__/
 *.pyc
+# results_summary/ is committed on purpose: the final numbers, no PNGs

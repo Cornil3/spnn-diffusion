@@ -138,15 +138,22 @@ Per-model iteration schemes (1-based; odd = forward, even = reverse):
    masks are clean single blobs, so cleanup now defaults to off
    (`--mask_open 0 --mask_close 0`).
 
-2. **PbE reference images.** ImagenHub has **no** Paint-by-Example wrapper at all —
-   their subject-driven benchmark runs PhotoSwap / DreamEdit / BLIP-Diffusion on a
-   different dataset — so REED must have improvised this row too, and so do we. Both
-   references are built the way the paper describes its `x_r^2`: the mask's bounding
-   box (largest connected component, 8px pad), cropped from `target_img` for `x_r^1`
-   and from `source_img` for `x_r^2`. With the alpha masks these are genuine object
-   crops: median 17% of frame, only 2/179 above 90%, none smaller than 32px a side.
-   (Under the old luminance masks they were 97% of frame — i.e. useless — which is how
-   the mask bug first became visible.)
+2. **PbE reference images — and where PbE's data comes from.** ImagenHub has **no**
+   Paint-by-Example wrapper: the only `paint`/`pbe` matches in their repo are unrelated
+   vendored assets, and their subject-driven benchmark runs PhotoSwap / DreamEdit /
+   BLIPDiffusion_Edit instead.
+
+   REED did **not** take PbE's data from ImagenHub's subject-driven subset either. That
+   subset has **154** eval images, whereas the paper reports 179 for every row, and §5.4
+   states PbE's inputs as `{x_s, C_t^local, m}` — `target_local_caption` and `mask_img`
+   are Mask_Guided_Image_Editing fields. So PbE was run on the same 179-image mask-guided
+   split as the rest of the table, with the reference images constructed by hand.
+
+   We do the same: both references are the mask's bounding box (largest connected
+   component, 8px pad), cropped from `target_img` for `x_r^1` and from `source_img` for
+   `x_r^2` — the latter is exactly what the paper describes building. With the correct
+   alpha masks these are genuine object crops: median 17% of frame, only 2/179 above
+   90%, none under 32px a side.
 
 3. **512×512 is an assumption — the paper never states its evaluation resolution.**
    The only "512 × 512" in REED-VAE is Appendix A under *Training*: "During training, we
@@ -225,67 +232,55 @@ sbatch --export=ALL,TAG=full179 reed_repro/slurm/evaluate.slurm
 a re-submitted job skips any sample whose four snapshots already exist, so preemption
 costs only the in-flight sample.
 
-## The seed regime — UNRESOLVED, hypothesis partly refuted
+## The seed regime — resolved: fixed 42 for the four ImagenHub-wrapped models
 
-> **Status (updated after the first full fixed-seed table).** The hypothesis below —
-> that REED looped over ImagenHub's `seed=42` default — was inferred from a probe that
-> measured **k=5 only**. PbE's full fixed-seed table now contradicts it:
->
-> | PbE, vanilla | k=5 | k=15 | k=25 |
-> |---|---|---|---|
-> | paper | 0.020 | 0.040 | 0.070 |
-> | ours, **varying** seed | 0.019 | 0.044 | 0.070 |
-> | ours, **fixed 42** | 0.011 | 0.066 | 0.111 |
->
-> The *varying* seed reproduces the paper across all three columns (LPIPS
-> 0.257/0.599/0.711 vs 0.260/0.600/0.710; FID 84.8/212.9/251.7 vs 83.5/209.3/253.6),
-> while fixed-42 buys k=5 and loses k=15/25, moving away from the paper on every metric.
->
-> So a fixed seed is **not** established as REED's protocol, and the IP2P k=5 gap is
-> still unexplained. Await IP2P's fixed-seed table — the model the hypothesis was built
-> on — before concluding. What *is* robust: SPNN beats the baseline on all five metrics
-> at k=15 and k=25 under **both** regimes, so the headline result does not depend on
-> resolving this.
+Both regimes were run to completion at n=179 and are kept side by side:
 
-### Original hypothesis and the k=5 measurement
+    --seed_mode varying  ->  results/full179/         wandb: full179-<model>-<codec>
+    --seed_mode fixed    ->  results/full179_seed42/  wandb: full179_seed42-<model>-<codec>-j<jobid>
 
+**Which one reproduces the paper depends on the model, and the split is explained by
+whether ImagenHub wraps that model at all.** Every ImagenHub wrapper
+(`InstructPix2Pix`, `MagicBrush`, `DiffEdit`, `SDInpaint`) declares
+`infer_one_image(..., seed: int = 42)` and calls `torch.manual_seed(seed)`, so looping
+over it reuses one seed on every iteration.
 
-Our first full run used a **different seed per iteration**. Against the paper, IP2P and
-MagicBrush matched closely at k=15/25 but were clearly worse at k=5 (IP2P MSE 0.038 vs
-0.02, PSNR 15.67 vs 17.78), while PbE and SD Inpainting matched throughout. A protocol
-error would corrupt all three columns; a *drift-rate* difference converges once both
-chains saturate — which is what we saw.
+| model | ImagenHub wrapper | matches the paper's vanilla under |
+|---|---|---|
+| IP2P, MagicBrush | yes, `seed=42` | **fixed 42** |
+| SD Inpainting | yes, `seed=42` | **fixed 42** |
+| DiffEdit | yes, `seed=42` | both track closely |
+| **PbE** | **none exists** | **varying seed** |
 
-Cause: ImagenHub's `infer_one_image` defaults to **`seed: int = 42`** (all of
-InstructPix2Pix, MagicBrush, DiffEdit and SDInpaint). Looping over it reuses that seed
-on every iteration. IP2P/MagicBrush run `EulerAncestralDiscreteScheduler`, which is
-*stochastic*, so seed reuse makes the early edit chain far more self-consistent. PbE and
-SD Inpainting use far less noise-sensitive schedulers, which is exactly why only the two
-EulerAncestral models showed the gap.
+Fixed-seed vanilla against REED's vanilla:
 
-Measured directly (`_seed_probe.py`, IP2P, 24 images, 5 iterations, seed the only
-variable):
+| | k=5 | k=15 | k=25 |
+|---|---|---|---|
+| IP2P paper | 0.020 | 0.110 | 0.150 |
+| IP2P ours (fixed) | 0.024 | 0.099 | 0.142 |
+| IP2P ours (varying) | 0.038 | 0.112 | 0.147 |
+| SD-Inpaint paper | 0.010 | 0.060 | 0.110 |
+| SD-Inpaint ours (fixed) | 0.010 | 0.060 | 0.112 |
 
-| regime | MSE | PSNR | LPIPS | SSIM |
-|---|---|---|---|---|
-| varying seed (our first run) | 0.0338 | 16.74 | 0.374 | 0.556 |
-| **fixed 42 (ImagenHub default)** | **0.0182** | **18.42** | **0.338** | **0.601** |
-| paper, vanilla IP2P @k=5 | 0.02 | 17.78 | 0.33 | 0.60 |
-| our full run @k=5 (n=179) | 0.038 | 15.67 | 0.40 | 0.55 |
+MagicBrush's SSIM under fixed seed matches the paper cell-for-cell (0.65/0.21/0.13).
 
-The varying arm on 24 images reproduces our 179-image result, so the subset is
-representative; the fixed-seed arm then lands on the paper on all four metrics at once.
+PbE runs the other way: its *varying*-seed vanilla is near-exact against the paper
+(MSE 0.019/0.044/0.070 vs 0.020/0.040/0.070; LPIPS 0.26/0.60/0.71 identical) while
+fixed-42 drifts (0.011/0.066/0.111). That is consistent rather than contradictory: PbE
+is the one model ImagenHub does **not** wrap, so there was no `seed=42` default for
+either REED or us to inherit — both had to improvise it.
 
-Both regimes are kept, under separate tags:
+Why the two EulerAncestral models are the sensitive ones: that scheduler is stochastic,
+so seed reuse makes the early edit chain far more self-consistent, which shows up at
+k=5 and washes out by k=15/25. PbE and SD Inpainting use far less noise-sensitive
+sampling.
 
-    --seed_mode varying   ->  results/full179/         wandb: full179-<model>-<codec>
-    --seed_mode fixed     ->  results/full179_seed42/  wandb: full179_seed42-<model>-<codec>-j<jobid>
+**None of this changes the finding.** SPNN beats each model's own VAE on all five
+metrics at k=15 and k=25, for all five models, under *both* regimes. Only the baseline's
+agreement with the paper depends on the seed protocol.
 
-`fixed` is what reproduces REED. `varying` is arguably the sounder measurement — reusing
-one seed correlates the noise across iterations and flatters early-iteration numbers. An
-SPNN advantage that holds under both is a stronger claim than one that holds under
-either. Both arms of a comparison always share the same seed at the same iteration, so
-the codec comparison stays controlled in either regime.
+Caveat: this is inference from behaviour. REED documents no seed, scheduler, step count
+or guidance scale anywhere.
 
 ## Using ImagenHub's own code
 
