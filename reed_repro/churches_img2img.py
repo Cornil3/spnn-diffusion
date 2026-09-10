@@ -11,6 +11,30 @@ Arms:
   2blk      checkpoints_churches_gt_householder_2blk_2gpu/spnn_vae_best.pt
   2blk_rt   checkpoints_churches_gt_householder_2blk_rt_2gpu/spnn_vae_best.pt
             (identical except trained with lambda_roundtrip=1.0)
+  2blk_dist checkpoints_churches_gt_householder_2blk_dist_2gpu/spnn_vae_best.pt
+            (lambda_decoder_distill=1/gt=0, vs the baseline's distill=0/gt=1)
+
+Configs below are the wandb record for each run, not the committed launcher scripts --
+train_athena.slurm does NOT match what these _2gpu checkpoints were actually trained
+with. All three share num_blocks=2, hidden=256, scale_bound=1.0, householder,
+deep_convmlp=False, img_size=256, lr=1e-4, n_test=1000, lambda_lpips=1, align=1.
+
+    2blk       distill=0  gt=1  roundtrip=0
+    2blk_rt    distill=0  gt=1  roundtrip=1     <- clean single-variable vs 2blk
+    2blk_dist  distill=1  gt=0  roundtrip=0     <- see caveat
+
+CAVEAT on 2blk vs 2blk_dist: this is not a single-variable swap. Flipping
+lambda_decoder_gt to 0 changes three things at once in train.py:
+  1. the reconstruction target: ground-truth image -> the VAE's own decode
+  2. the reconstruction norm:   l1_loss -> mse_loss  (gt uses L1, distill uses L2)
+  3. the LPIPS target, via `lpips_target = images if lambda_decoder_gt > 0
+     else vae_decoded`  (train.py ~line 298)
+So it contrasts "everything targets ground truth" against "everything targets the
+teacher" -- the right experiment for the distillation question, but the L1->L2 change
+rides along and can move perceptual metrics on its own.
+
+Arms share a tag, so they see identical source images and identical per-iteration
+noise (seed_for is codec-independent) and are directly paired.
 
 Diffusion parameters come from DDNM-main/configs/lsun_churches_2blk_2gpu.yml, i.e. the
 churches defaults: quad betas 0.0015->0.0155 over 1000 timesteps, 100 sampling steps,
@@ -59,6 +83,7 @@ ARMS = {
     "compvis": None,   # the teacher VAE
     "2blk":    "checkpoints_churches_gt_householder_2blk_2gpu/spnn_vae_best.pt",
     "2blk_rt": "checkpoints_churches_gt_householder_2blk_rt_2gpu/spnn_vae_best.pt",
+    "2blk_dist": "checkpoints_churches_gt_householder_2blk_dist_2gpu/spnn_vae_best.pt",
 }
 
 
