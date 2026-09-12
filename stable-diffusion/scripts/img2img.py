@@ -214,6 +214,38 @@ def main():
              "Enables per-step DDNM back-projection with A(x) = observed_mask * x, Ap = A.",
     )
     parser.add_argument(
+        "--bp_schedule",
+        type=str,
+        default="every",
+        choices=["every", "phased"],
+        help="BP schedule. 'every' (default): BP every step with lambda=1.0. "
+             "'phased': steps 0-2 lambda=1.0, steps 3-12 skip, then --bp_lambda every 10 steps.",
+    )
+    parser.add_argument(
+        "--bp_lambda",
+        type=float,
+        default=0.5,
+        help="Only used with --bp_schedule phased. Lambda for the every-10-steps late phase.",
+    )
+    parser.add_argument(
+        "--mask_feather_sigma",
+        type=float,
+        default=0.0,
+        help="Optional: Gaussian sigma (pixels) to blur the binary inpainting mask. "
+             "0 = binary mask (hard boundary). >0 = soft observed_mask, removes the "
+             "step-function discontinuity at the mask edge (helps invertible codecs "
+             "like SPNN stay in-distribution). Typical values: 8-24 (~1-3 latent px).",
+    )
+    parser.add_argument(
+        "--x0_smooth_sigma",
+        type=float,
+        default=0.0,
+        help="Optional: Gaussian sigma (pixels) to smooth the entire x0_t_hat pixel "
+             "image AFTER the BP correction and BEFORE re-encoding into latent. "
+             "Removes high-freq content SPNN's invertibility would transmit into the "
+             "latent OOD-territory. 0 = disabled. Typical values: 1-4.",
+    )
+    parser.add_argument(
         "--debug_dir",
         type=str,
         default=None,
@@ -304,6 +336,13 @@ def main():
         inpaint_mask = torch.from_numpy(mask_np)[None, None].to(device)   # (1,1,H,W)
         observed_mask = 1.0 - inpaint_mask                                # 1 = keep observed
 
+        if opt.mask_feather_sigma > 0:
+            from torchvision.transforms.functional import gaussian_blur
+            sigma = float(opt.mask_feather_sigma)
+            ksize = 2 * int(3 * sigma) + 1                                # odd kernel
+            observed_mask = gaussian_blur(observed_mask, kernel_size=ksize, sigma=sigma)
+            print(f"Feathered observed_mask with sigma={sigma}px (kernel={ksize})")
+
         # Inpainting degradation: A(x) = M * x, Ap = A (self-adjoint idempotent).
         def A_inpaint(x):  return observed_mask * x
         Ap_inpaint = A_inpaint
@@ -312,15 +351,33 @@ def main():
         sampler.bp_A  = A_inpaint
         sampler.bp_Ap = Ap_inpaint
         sampler.bp_y  = y_inpaint
+        sampler.x0_smooth_sigma = opt.x0_smooth_sigma
+
+        if opt.bp_schedule == "phased":
+            def bp_lambda_fn(step_idx, lam=opt.bp_lambda):
+                if step_idx <= 2:
+                    return 1.0
+                if step_idx <= 12:
+                    return 0.0
+                if (step_idx - 13) % 10 == 0:
+                    return lam
+                return 0.0
+            sampler.bp_lambda_fn = bp_lambda_fn
+            sched_desc = (f"phased — steps 0-2 lambda=1.0, steps 3-12 skip, "
+                          f"then lambda={opt.bp_lambda} every 10 steps (13, 23, 33, ...)")
+        else:
+            # No lambda_fn -> defaults to lambda=1.0 every step in ddim.py
+            sched_desc = "every step, lambda=1.0"
         print(f"BP inpainting enabled — mask: {opt.inpainting_mask}, "
               f"observed frac: {observed_mask.mean().item():.3f}")
+        print(f"BP schedule: {sched_desc}")
 
     if opt.debug_dir:
         os.makedirs(opt.debug_dir, exist_ok=True)
         sampler.debug_dir = opt.debug_dir
-        sampler._debug_step_idx = 0
         print(f"Per-step debug enabled — x0_t / x0_t_hat -> {opt.debug_dir}")
 
+    sampler._step_idx = 0
     sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
 
     assert 0. <= opt.strength <= 1., 'can only work with strength in [0.0, 1.0]'

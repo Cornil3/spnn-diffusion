@@ -194,33 +194,58 @@ class DDIMSampler(object):
         # current prediction for x_0
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
 
-        # General DDNM back-projection: pred_x0 = encode(decode(pred_x0) - Ap(A(decode) - y)).
+        # General DDNM back-projection: pred_x0 = encode(decode(pred_x0) - lam*Ap(A(decode)-y)).
         # bp_A / bp_Ap are callables on pixel tensors, bp_y is a fixed measurement tensor.
+        # bp_lambda_fn(step_idx) -> float in [0, 1]; 0 skips BP AND the decode/encode roundtrip.
+        step_idx = getattr(self, "_step_idx", 0)
+
         _bp_on = (getattr(self, "bp_A",  None) is not None and
                   getattr(self, "bp_Ap", None) is not None and
                   getattr(self, "bp_y",  None) is not None)
         _debug_dir = getattr(self, "debug_dir", None)
 
-        if _debug_dir is not None or _bp_on:
+        _lambda_fn = getattr(self, "bp_lambda_fn", None)
+        lam = float(_lambda_fn(step_idx)) if _lambda_fn is not None else 1.0
+
+        # If BP is configured, only decode/encode when actually applying it (lam > 0).
+        # Debug saves ride on the same decode: no BP-step -> no decode -> no debug save.
+        # If BP is not configured, debug alone triggers a viz-only decode.
+        if _bp_on and lam > 0.0:
             x0_pixel = self.model.decode_first_stage(pred_x0)
+            if _debug_dir is not None:
+                import os
+                from torchvision.utils import save_image
+                os.makedirs(_debug_dir, exist_ok=True)
+                save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                           os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t.png"))
 
-        if _debug_dir is not None:
-            import os
-            from torchvision.utils import save_image
-            step_idx = getattr(self, "_debug_step_idx", 0)
-            os.makedirs(_debug_dir, exist_ok=True)
-            save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
-                       os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t.png"))
+            x0_pixel = x0_pixel - lam * self.bp_Ap(self.bp_A(x0_pixel) - self.bp_y)
 
-        if _bp_on:
-            x0_pixel = x0_pixel - self.bp_Ap(self.bp_A(x0_pixel) - self.bp_y)
+            # Optional whole-image Gaussian smoothing before re-encoding.
+            # Removes high-freq content that SPNN's invertibility would otherwise
+            # transmit verbatim into the latent, pulling the trajectory OOD.
+            _smooth_sig = float(getattr(self, "x0_smooth_sigma", 0.0) or 0.0)
+            if _smooth_sig > 0.0:
+                from torchvision.transforms.functional import gaussian_blur
+                _ksize = 2 * int(3 * _smooth_sig) + 1
+                x0_pixel = gaussian_blur(x0_pixel, kernel_size=_ksize, sigma=_smooth_sig)
+
             pred_x0  = self.model.get_first_stage_encoding(
                 self.model.encode_first_stage(x0_pixel))
 
-        if _debug_dir is not None:
-            save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
-                       os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
-            self._debug_step_idx = step_idx + 1
+            if _debug_dir is not None:
+                save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                           os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
+        elif not _bp_on and _debug_dir is not None:
+            import os
+            from torchvision.utils import save_image
+            os.makedirs(_debug_dir, exist_ok=True)
+            x0_pixel_viz = self.model.decode_first_stage(pred_x0)
+            img = ((x0_pixel_viz.detach() + 1) / 2).clamp(0, 1)
+            save_image(img, os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t.png"))
+            save_image(img, os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
+
+        self._step_idx = step_idx + 1
 
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
