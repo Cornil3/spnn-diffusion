@@ -196,13 +196,31 @@ class DDIMSampler(object):
 
         # General DDNM back-projection: pred_x0 = encode(decode(pred_x0) - Ap(A(decode) - y)).
         # bp_A / bp_Ap are callables on pixel tensors, bp_y is a fixed measurement tensor.
-        if (getattr(self, "bp_A",  None) is not None and
-            getattr(self, "bp_Ap", None) is not None and
-            getattr(self, "bp_y",  None) is not None):
+        _bp_on = (getattr(self, "bp_A",  None) is not None and
+                  getattr(self, "bp_Ap", None) is not None and
+                  getattr(self, "bp_y",  None) is not None)
+        _debug_dir = getattr(self, "debug_dir", None)
+
+        if _debug_dir is not None or _bp_on:
             x0_pixel = self.model.decode_first_stage(pred_x0)
+
+        if _debug_dir is not None:
+            import os
+            from torchvision.utils import save_image
+            step_idx = getattr(self, "_debug_step_idx", 0)
+            os.makedirs(_debug_dir, exist_ok=True)
+            save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                       os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t.png"))
+
+        if _bp_on:
             x0_pixel = x0_pixel - self.bp_Ap(self.bp_A(x0_pixel) - self.bp_y)
             pred_x0  = self.model.get_first_stage_encoding(
                 self.model.encode_first_stage(x0_pixel))
+
+        if _debug_dir is not None:
+            save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                       os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
+            self._debug_step_idx = step_idx + 1
 
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)

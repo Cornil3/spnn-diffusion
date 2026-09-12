@@ -245,6 +245,13 @@ def main():
         choices=["ema", "model"],
         help="Which state_dict key inside the SPNN ckpt to load.",
     )
+    parser.add_argument(
+        "--debug_dir",
+        type=str,
+        default=None,
+        help="Optional: dir to save decoded x0_t (and x0_t_hat, same for txt2img) "
+             "at every DDIM step. Requires --ddim (i.e. no --plms/--dpm_solver).",
+    )
     opt = parser.parse_args()
 
     if opt.laion400m:
@@ -304,6 +311,12 @@ def main():
         sampler = PLMSSampler(model)
     else:
         sampler = DDIMSampler(model)
+
+    if opt.debug_dir:
+        os.makedirs(opt.debug_dir, exist_ok=True)
+        sampler.debug_dir = opt.debug_dir
+        sampler._debug_step_idx = 0
+        print(f"Per-step debug enabled — x0_t / x0_t_hat -> {opt.debug_dir}")
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir

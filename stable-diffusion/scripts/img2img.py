@@ -213,6 +213,12 @@ def main():
              "White (1) = inpaint (regenerate), black (0) = observed (keep). "
              "Enables per-step DDNM back-projection with A(x) = observed_mask * x, Ap = A.",
     )
+    parser.add_argument(
+        "--debug_dir",
+        type=str,
+        default=None,
+        help="Optional: dir to save decoded x0_t and x0_t_hat at every DDIM step.",
+    )
 
     opt = parser.parse_args()
     seed_everything(opt.seed)
@@ -308,6 +314,12 @@ def main():
         sampler.bp_y  = y_inpaint
         print(f"BP inpainting enabled — mask: {opt.inpainting_mask}, "
               f"observed frac: {observed_mask.mean().item():.3f}")
+
+    if opt.debug_dir:
+        os.makedirs(opt.debug_dir, exist_ok=True)
+        sampler.debug_dir = opt.debug_dir
+        sampler._debug_step_idx = 0
+        print(f"Per-step debug enabled — x0_t / x0_t_hat -> {opt.debug_dir}")
 
     sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
 
