@@ -232,6 +232,19 @@ def main():
         choices=["full", "autocast"],
         default="autocast"
     )
+    parser.add_argument(
+        "--spnn_checkpoint",
+        type=str,
+        default=None,
+        help="Optional: path to SPNN ckpt_last.pt to replace the SD 1.5 VAE.",
+    )
+    parser.add_argument(
+        "--spnn_weights",
+        type=str,
+        default="ema",
+        choices=["ema", "model"],
+        help="Which state_dict key inside the SPNN ckpt to load.",
+    )
     opt = parser.parse_args()
 
     if opt.laion400m:
@@ -247,6 +260,43 @@ def main():
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
+
+    if opt.spnn_checkpoint:
+        sys.path.insert(0, "/home/yamitehrlich/work/spnn-diffusion")
+        from imagenet_latent_ddnm.spnn_model import SPNNAutoencoder512
+        spnn = SPNNAutoencoder512(mix_type="householder", hidden=128,
+                                  r_hidden=256, scale_bound=1.0)
+        state = torch.load(opt.spnn_checkpoint, map_location="cpu",
+                           weights_only=False)
+        sd = state[opt.spnn_weights]
+        stripped = {k[len("spnn."):]: v for k, v in sd.items()
+                    if k.startswith("spnn.")}
+        missing, unexpected = spnn.load_state_dict(stripped, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"SPNN load mismatch: missing={len(missing)} "
+                f"unexpected={len(unexpected)}; first_missing={list(missing)[:5]}"
+            )
+        spnn.eval().requires_grad_(False).to(device)
+
+        class SPNNFirstStage(torch.nn.Module):
+            """Minimal shim exposing (encode, decode) as CompVis LatentDiffusion
+            expects. SPNN-512 emits SD's prescaled latents (already x0.18215),
+            but LatentDiffusion multiplies by scale_factor after encode and
+            divides before decode - so we invert those two ops here. txt2img
+            uses only decode; encode is present for interface completeness."""
+            def __init__(self, spnn, sf):
+                super().__init__()
+                self.spnn = spnn
+                self.sf = sf
+            def encode(self, x):
+                return self.spnn.encode(x) / self.sf
+            def decode(self, z):
+                return self.spnn.decode(z * self.sf)
+
+        model.first_stage_model = SPNNFirstStage(spnn, model.scale_factor).to(device)
+        print(f"Swapped VAE with SPNN from {opt.spnn_checkpoint} "
+              f"(weights='{opt.spnn_weights}')")
 
     if opt.dpm_solver:
         sampler = DPMSolverSampler(model)

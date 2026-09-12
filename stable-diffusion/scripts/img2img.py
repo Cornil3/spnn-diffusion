@@ -192,6 +192,27 @@ def main():
         choices=["full", "autocast"],
         default="autocast"
     )
+    parser.add_argument(
+        "--spnn_checkpoint",
+        type=str,
+        default=None,
+        help="Optional: path to SPNN ckpt_last.pt to replace the SD 1.5 VAE.",
+    )
+    parser.add_argument(
+        "--spnn_weights",
+        type=str,
+        default="ema",
+        choices=["ema", "model"],
+        help="Which state_dict key inside the SPNN ckpt to load.",
+    )
+    parser.add_argument(
+        "--inpainting_mask",
+        type=str,
+        default=None,
+        help="Optional: path to binary mask PNG (same size as init image). "
+             "White (1) = inpaint (regenerate), black (0) = observed (keep). "
+             "Enables per-step DDNM back-projection with A(x) = observed_mask * x, Ap = A.",
+    )
 
     opt = parser.parse_args()
     seed_everything(opt.seed)
@@ -201,6 +222,42 @@ def main():
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
+
+    if opt.spnn_checkpoint:
+        sys.path.insert(0, "/home/yamitehrlich/work/spnn-diffusion")
+        from imagenet_latent_ddnm.spnn_model import SPNNAutoencoder512
+        spnn = SPNNAutoencoder512(mix_type="householder", hidden=128,
+                                  r_hidden=256, scale_bound=1.0)
+        state = torch.load(opt.spnn_checkpoint, map_location="cpu",
+                           weights_only=False)
+        sd = state[opt.spnn_weights]
+        stripped = {k[len("spnn."):]: v for k, v in sd.items()
+                    if k.startswith("spnn.")}
+        missing, unexpected = spnn.load_state_dict(stripped, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"SPNN load mismatch: missing={len(missing)} "
+                f"unexpected={len(unexpected)}; first_missing={list(missing)[:5]}"
+            )
+        spnn.eval().requires_grad_(False).to(device)
+
+        class SPNNFirstStage(torch.nn.Module):
+            """Minimal shim exposing (encode, decode) as CompVis LatentDiffusion
+            expects. SPNN-512 emits SD's prescaled latents (already x0.18215),
+            but LatentDiffusion multiplies by scale_factor after encode and
+            divides before decode - so we invert those two ops here."""
+            def __init__(self, spnn, sf):
+                super().__init__()
+                self.spnn = spnn
+                self.sf = sf
+            def encode(self, x):
+                return self.spnn.encode(x) / self.sf
+            def decode(self, z):
+                return self.spnn.decode(z * self.sf)
+
+        model.first_stage_model = SPNNFirstStage(spnn, model.scale_factor).to(device)
+        print(f"Swapped VAE with SPNN from {opt.spnn_checkpoint} "
+              f"(weights='{opt.spnn_weights}')")
 
     if opt.plms:
         raise NotImplementedError("PLMS sampler not (yet) supported")
@@ -233,6 +290,24 @@ def main():
     init_image = load_img(opt.init_img).to(device)
     init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
     init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
+
+    if opt.inpainting_mask:
+        mask_img = Image.open(opt.inpainting_mask).convert("L").resize(
+            (init_image.shape[-1], init_image.shape[-2]), resample=Image.NEAREST)
+        mask_np = np.array(mask_img).astype(np.float32) / 255.0
+        inpaint_mask = torch.from_numpy(mask_np)[None, None].to(device)   # (1,1,H,W)
+        observed_mask = 1.0 - inpaint_mask                                # 1 = keep observed
+
+        # Inpainting degradation: A(x) = M * x, Ap = A (self-adjoint idempotent).
+        def A_inpaint(x):  return observed_mask * x
+        Ap_inpaint = A_inpaint
+        y_inpaint  = A_inpaint(init_image)                                # fixed measurement
+
+        sampler.bp_A  = A_inpaint
+        sampler.bp_Ap = Ap_inpaint
+        sampler.bp_y  = y_inpaint
+        print(f"BP inpainting enabled — mask: {opt.inpainting_mask}, "
+              f"observed frac: {observed_mask.mean().item():.3f}")
 
     sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
 

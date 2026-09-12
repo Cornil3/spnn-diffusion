@@ -193,6 +193,17 @@ class DDIMSampler(object):
 
         # current prediction for x_0
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
+
+        # General DDNM back-projection: pred_x0 = encode(decode(pred_x0) - Ap(A(decode) - y)).
+        # bp_A / bp_Ap are callables on pixel tensors, bp_y is a fixed measurement tensor.
+        if (getattr(self, "bp_A",  None) is not None and
+            getattr(self, "bp_Ap", None) is not None and
+            getattr(self, "bp_y",  None) is not None):
+            x0_pixel = self.model.decode_first_stage(pred_x0)
+            x0_pixel = x0_pixel - self.bp_Ap(self.bp_A(x0_pixel) - self.bp_y)
+            pred_x0  = self.model.get_first_stage_encoding(
+                self.model.encode_first_stage(x0_pixel))
+
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
         # direction pointing to x_t
