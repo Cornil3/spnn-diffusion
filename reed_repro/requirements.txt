@@ -1,0 +1,6 @@
+imagen-hub>=0.4.0        # infermodels wrappers + rgba_to_01_mask (mask lives in ALPHA)
+# On top of the existing athena venv (torch, diffusers, transformers, datasets, lpips, wandb).
+pytorch-fid>=0.3.0     # the FID implementation REED-VAE cites [Sei20]
+torchmetrics>=1.0      # SSIM (falls back to scikit-image if absent)
+scikit-image>=0.21     # SSIM fallback
+accelerate>=0.25       # diffusers pipeline loading
