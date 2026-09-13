@@ -1,0 +1,338 @@
+[
+ {
+  "prompt_i": 0,
+  "prompt": "Winter wonderland, fresh snowfall, evergreen trees, cozy log cabin, smoke rising from chimney, aurora borealis in night sky.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.00594530301168561,
+   "clip": 0.31007304787635803
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.26129627227783203
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.003567181993275881,
+   "clip": 0.3100689649581909
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.3131052851676941
+  }
+ },
+ {
+  "prompt_i": 1,
+  "prompt": "Cherry blossom festival, pink petals floating in the air, traditional lanterns, peaceful river, people in kimonos, sunny day.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.004756242502480745,
+   "clip": 0.28572750091552734
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.02140309102833271,
+   "clip": 0.18323487043380737
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.00594530301168561,
+   "clip": 0.30815359950065613
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.280720591545105
+  }
+ },
+ {
+  "prompt_i": 2,
+  "prompt": "Majestic waterfall, lush rainforest, rainbow in the mist, exotic birds, vibrant flowers, serene pool below.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.30712589621543884
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.21426409482955933
+  },
+  "sandwich|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.007134363986551762,
+   "clip": 0.3079770505428314
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.2780633270740509
+  }
+ },
+ {
+  "prompt_i": 3,
+  "prompt": "Abandoned amusement park, overgrown rides, haunting beauty, sense of nostalgia, sunset lighting.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.003567181993275881,
+   "clip": 0.2584707736968994
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.2106148600578308
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.003567181993275881,
+   "clip": 0.2691192328929901
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.2745254635810852
+  }
+ },
+ {
+  "prompt_i": 4,
+  "prompt": "Old European town square, cobblestone streets, cafe terraces, flowering balconies, gothic cathedral, bustling morning.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.008323424495756626,
+   "clip": 0.26550135016441345
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.22048114240169525
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.008323424495756626,
+   "clip": 0.2700697183609009
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.26842832565307617
+  }
+ },
+ {
+  "prompt_i": 5,
+  "prompt": "Forest clearing at night, fireflies, full moon, ancient oak tree, soft grass, mystical ambiance.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.2845064401626587
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.22766795754432678
+  },
+  "sandwich|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.2537180781364441
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.2530483603477478
+  }
+ },
+ {
+  "prompt_i": 6,
+  "prompt": "Mediterranean seaside town, white-washed buildings, blue-domed churches, fishing boats, vibrant market, sunny day.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.2732471227645874
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.22986379265785217
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.008323424495756626,
+   "clip": 0.28151026368141174
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.2852817177772522
+  }
+ },
+ {
+  "prompt_i": 7,
+  "prompt": "Mountain hot springs in winter, snow around, steam rising, natural pool, serene and warm retreat.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.2611020803451538
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.19008678197860718
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.26324209570884705
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.26574888825416565
+  }
+ },
+ {
+  "prompt_i": 8,
+  "prompt": "Abandoned lighthouse on a stormy night, crashing waves, mysterious allure, rugged coastline.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.27414417266845703
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.21721619367599487
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.004756242502480745,
+   "clip": 0.283164918422699
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.2846328914165497
+  }
+ },
+ {
+  "prompt_i": 9,
+  "prompt": "Enchanted forest path, magical creatures, ancient trees, glowing lanterns, fairy tale setting.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.30847615003585815
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.2526343762874603
+  },
+  "sandwich|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0023781212512403727,
+   "clip": 0.3192501664161682
+  },
+  "mpgd|SPNN": {
+   "scan": true,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.32244062423706055
+  }
+ },
+ {
+  "prompt_i": 10,
+  "prompt": "Foggy London street, vintage lampposts, double-decker bus, historic buildings, cobblestone pavement, early morning.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.004756242502480745,
+   "clip": 0.1952713280916214
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.18352216482162476
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.003567181993275881,
+   "clip": 0.17818449437618256
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.17880967259407043
+  }
+ },
+ {
+  "prompt_i": 11,
+  "prompt": "Secret garden behind an old mansion, hidden pathways, antique statues, undiscovered beauty.",
+  "sandwich|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0011890606256201863,
+   "clip": 0.26739102602005005
+  },
+  "mpgd|SD-VAE": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.213923379778862
+  },
+  "sandwich|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.28313392400741577
+  },
+  "mpgd|SPNN": {
+   "scan": false,
+   "scan_zxing": false,
+   "err": 0.0,
+   "clip": 0.28284239768981934
+  }
+ }
+]

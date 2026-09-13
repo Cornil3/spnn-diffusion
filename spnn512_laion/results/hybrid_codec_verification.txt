@@ -1,0 +1,14 @@
+spnn step 49000
+
+ENCODER   ||E_hyb - E_vae|| / ||E_vae||  = 0.000e+00   <- 0 means the hybrid encoder IS the SD VAE
+          ||E_spnn - E_vae|| / ||E_vae||  = 2.098e-01   <- how far SPNN's encoder actually is
+          latent rms: SD-VAE 5.3129   SPNN 5.2812
+          SD-VAE posterior std: mean 0.0008  vs |mean latent| 4.1827   (SPNN shim uses std ~3e-7, i.e. deterministic)
+
+DECODER   ||D_hyb - D_spnn|| / ||D_spnn|| = 2.064e-04   <- 0 means the hybrid decoder IS SPNN
+          ||D_hyb - D_vae||  / ||D_vae||  = 1.125e-01
+
+1x ROUND TRIP PSNR   SD-VAE 25.76   SPNN 26.47   hybrid 26.49
+latent idempotency ||E(D(z))-z||/||z||  SD-VAE  1.158e-01
+latent idempotency ||E(D(z))-z||/||z||  SPNN    1.504e-03
+latent idempotency ||E(D(z))-z||/||z||  hybrid  1.648e-01
