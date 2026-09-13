@@ -321,6 +321,10 @@ def main():
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
 
+    with open(os.path.join(opt.outdir, "settings.txt"), "w") as _f:
+        for _k in sorted(vars(opt).keys()):
+            _f.write(f"{_k}={getattr(opt, _k)}\n")
+
     print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
     wm = "StableDiffusionV1"
     wm_encoder = WatermarkEncoder()

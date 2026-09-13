@@ -9,6 +9,28 @@ from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, mak
     extract_into_tensor
 
 
+def get_schedule_jump(T_sampling, travel_length, travel_repeat):
+    """RePaint-style time-travel schedule (from DDNM-main). Returns a sequence of
+    (T_sampling-1, T_sampling-2, ..., 0, -1) with backward jumps injected every
+    `travel_length` steps, each jump followed by re-running the forward segment
+    `travel_repeat - 1` extra times."""
+    jumps = {}
+    for j in range(0, T_sampling - travel_length, travel_length):
+        jumps[j] = travel_repeat - 1
+    t = T_sampling
+    ts = []
+    while t >= 1:
+        t = t - 1
+        ts.append(t)
+        if jumps.get(t, 0) > 0:
+            jumps[t] = jumps[t] - 1
+            for _ in range(travel_length):
+                t = t + 1
+                ts.append(t)
+    ts.append(-1)
+    return ts
+
+
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
         super().__init__()
@@ -221,6 +243,11 @@ class DDIMSampler(object):
 
             x0_pixel = x0_pixel - lam * self.bp_Ap(self.bp_A(x0_pixel) - self.bp_y)
 
+            # Save x0_t_hat = post-BP, pre-smoothing (the "raw" measurement-consistent image).
+            if _debug_dir is not None:
+                save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                           os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
+
             # Optional whole-image Gaussian smoothing before re-encoding.
             # Removes high-freq content that SPNN's invertibility would otherwise
             # transmit verbatim into the latent, pulling the trajectory OOD.
@@ -230,12 +257,14 @@ class DDIMSampler(object):
                 _ksize = 2 * int(3 * _smooth_sig) + 1
                 x0_pixel = gaussian_blur(x0_pixel, kernel_size=_ksize, sigma=_smooth_sig)
 
+                # Save x0_t_hat_smooth = post-BP + post-smoothing (what actually gets encoded).
+                if _debug_dir is not None:
+                    save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
+                               os.path.join(_debug_dir,
+                                            f"step_{step_idx:03d}_x0_t_hat_smooth.png"))
+
             pred_x0  = self.model.get_first_stage_encoding(
                 self.model.encode_first_stage(x0_pixel))
-
-            if _debug_dir is not None:
-                save_image(((x0_pixel.detach() + 1) / 2).clamp(0, 1),
-                           os.path.join(_debug_dir, f"step_{step_idx:03d}_x0_t_hat.png"))
         elif not _bp_on and _debug_dir is not None:
             import os
             from torchvision.utils import save_image
@@ -275,21 +304,59 @@ class DDIMSampler(object):
 
     @torch.no_grad()
     def decode(self, x_latent, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
-               use_original_steps=False):
+               use_original_steps=False, travel_length=1, travel_repeat=1):
 
         timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
         timesteps = timesteps[:t_start]
 
-        time_range = np.flip(timesteps)
-        total_steps = timesteps.shape[0]
-        print(f"Running DDIM Sampling with {total_steps} timesteps")
+        # Fast path: no time travel — original linear loop.
+        if travel_length == 1 and travel_repeat == 1:
+            time_range = np.flip(timesteps)
+            total_steps = timesteps.shape[0]
+            print(f"Running DDIM Sampling with {total_steps} timesteps")
+            iterator = tqdm(time_range, desc='Decoding image', total=total_steps)
+            x_dec = x_latent
+            for i, step in enumerate(iterator):
+                index = total_steps - i - 1
+                ts = torch.full((x_latent.shape[0],), step, device=x_latent.device, dtype=torch.long)
+                x_dec, _ = self.p_sample_ddim(x_dec, cond, ts, index=index, use_original_steps=use_original_steps,
+                                              unconditional_guidance_scale=unconditional_guidance_scale,
+                                              unconditional_conditioning=unconditional_conditioning)
+            return x_dec
 
-        iterator = tqdm(time_range, desc='Decoding image', total=total_steps)
+        # Time-travel path (RePaint-style, from DDNM).
+        # Each (i_idx, j_idx) pair with j < i is a normal reverse-DDIM step from
+        # index i_idx-1 to j_idx. j > i is a "jump back": re-noise pred_x0 to level j.
+        times = get_schedule_jump(t_start, travel_length, travel_repeat)
+        total_reverse = sum(1 for ii, jj in zip(times[:-1], times[1:]) if jj < ii)
+        print(f"Running DDIM w/ time-travel (T_start={t_start}, "
+              f"travel_length={travel_length}, travel_repeat={travel_repeat}): "
+              f"{total_reverse} reverse steps, {len(times)-1} total transitions")
+
+        alphas = self.ddim_alphas
         x_dec = x_latent
-        for i, step in enumerate(iterator):
-            index = total_steps - i - 1
-            ts = torch.full((x_latent.shape[0],), step, device=x_latent.device, dtype=torch.long)
-            x_dec, _ = self.p_sample_ddim(x_dec, cond, ts, index=index, use_original_steps=use_original_steps,
-                                          unconditional_guidance_scale=unconditional_guidance_scale,
-                                          unconditional_conditioning=unconditional_conditioning)
+        pred_x0 = None
+        n = x_latent.shape[0]
+        T = t_start
+        for i_idx, j_idx in tqdm(list(zip(times[:-1], times[1:])), desc='TT-DDIM'):
+            if j_idx < i_idx:
+                # Normal reverse step at DDIM position i_idx (values in [0, T-1]
+                # map directly to ddim_alphas / ddim_timesteps indices).
+                idx = max(0, min(int(i_idx), T - 1))
+                step_val = int(timesteps[idx])
+                ts = torch.full((n,), step_val, device=x_dec.device, dtype=torch.long)
+                x_dec, pred_x0 = self.p_sample_ddim(
+                    x_dec, cond, ts, index=idx, use_original_steps=use_original_steps,
+                    unconditional_guidance_scale=unconditional_guidance_scale,
+                    unconditional_conditioning=unconditional_conditioning)
+            else:
+                # Jump back: re-noise pred_x0 to noise level at DDIM position j_idx.
+                if pred_x0 is None:
+                    continue
+                idx_j    = max(0, min(int(j_idx), T - 1))
+                alpha_j  = torch.tensor(
+                    float(alphas[idx_j]), device=x_dec.device, dtype=x_dec.dtype
+                ).view(1, 1, 1, 1)
+                noise    = torch.randn_like(x_dec)
+                x_dec    = alpha_j.sqrt() * pred_x0 + (1.0 - alpha_j).sqrt() * noise
         return x_dec

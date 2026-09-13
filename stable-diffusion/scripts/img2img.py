@@ -202,9 +202,14 @@ def main():
         "--spnn_weights",
         type=str,
         default="ema",
-        choices=["ema", "model"],
-        help="Which state_dict key inside the SPNN ckpt to load.",
+        help="Which state_dict key inside the SPNN ckpt to load. "
+             "Common values: 'ema', 'model', 'model_state_dict'.",
     )
+    parser.add_argument("--spnn_mix_type", type=str, default="householder",
+                        choices=["householder", "cayley", "identity"])
+    parser.add_argument("--spnn_hidden", type=int, default=128)
+    parser.add_argument("--spnn_r_hidden", type=int, default=256)
+    parser.add_argument("--spnn_scale_bound", type=float, default=1.0)
     parser.add_argument(
         "--inpainting_mask",
         type=str,
@@ -217,15 +222,45 @@ def main():
         "--bp_schedule",
         type=str,
         default="every",
-        choices=["every", "phased"],
+        choices=["every", "phased", "stop_last", "every_n"],
         help="BP schedule. 'every' (default): BP every step with lambda=1.0. "
-             "'phased': steps 0-2 lambda=1.0, steps 3-12 skip, then --bp_lambda every 10 steps.",
+             "'phased': steps 0-2 lambda=1.0, steps 3-12 skip, then --bp_lambda every 10 steps. "
+             "'stop_last': BP every step until --bp_stop_last_n from end, then off "
+             "(also skips encode/decode for those tail steps). "
+             "'every_n': BP fires at step_idx %% --bp_every_n_steps == 0.",
     )
     parser.add_argument(
         "--bp_lambda",
         type=float,
         default=0.5,
         help="Only used with --bp_schedule phased. Lambda for the every-10-steps late phase.",
+    )
+    parser.add_argument(
+        "--bp_stop_last_n",
+        type=int,
+        default=0,
+        help="Only used with --bp_schedule stop_last. Number of trailing DDIM steps "
+             "to skip BP (and its encode/decode) entirely.",
+    )
+    parser.add_argument(
+        "--bp_every_n_steps",
+        type=int,
+        default=3,
+        help="Only used with --bp_schedule every_n. BP fires at step_idx % N == 0.",
+    )
+    parser.add_argument(
+        "--travel_length",
+        type=int,
+        default=1,
+        help="RePaint-style time-travel: how many steps to loop back at a time. "
+             "1 = no time travel (standard DDIM). Typical DDNM value: 5.",
+    )
+    parser.add_argument(
+        "--travel_repeat",
+        type=int,
+        default=1,
+        help="RePaint-style time-travel: how many extra passes per travel_length "
+             "segment. 1 = single pass (no time travel). Typical DDNM value: 2-10.",
     )
     parser.add_argument(
         "--mask_feather_sigma",
@@ -246,6 +281,16 @@ def main():
              "latent OOD-territory. 0 = disabled. Typical values: 1-4.",
     )
     parser.add_argument(
+        "--fill_hole_sigma",
+        type=float,
+        default=0.0,
+        help="Optional: fill the hole (unobserved region) of the encoded init with a "
+             "Gaussian-weighted average of the closest observed pixels within reach "
+             "~3*sigma before encoding. Removes the 'gray square' signal from the "
+             "encoded init so the UNet's trajectory starts on-manifold. 0 = disabled. "
+             "Typical values: 16-64 (spatial reach in pixels).",
+    )
+    parser.add_argument(
         "--debug_dir",
         type=str,
         default=None,
@@ -264,13 +309,24 @@ def main():
     if opt.spnn_checkpoint:
         sys.path.insert(0, "/home/yamitehrlich/work/spnn-diffusion")
         from imagenet_latent_ddnm.spnn_model import SPNNAutoencoder512
-        spnn = SPNNAutoencoder512(mix_type="householder", hidden=128,
-                                  r_hidden=256, scale_bound=1.0)
+        spnn = SPNNAutoencoder512(mix_type=opt.spnn_mix_type, hidden=opt.spnn_hidden,
+                                  r_hidden=opt.spnn_r_hidden, scale_bound=opt.spnn_scale_bound)
         state = torch.load(opt.spnn_checkpoint, map_location="cpu",
                            weights_only=False)
-        sd = state[opt.spnn_weights]
-        stripped = {k[len("spnn."):]: v for k, v in sd.items()
-                    if k.startswith("spnn.")}
+        # Some checkpoints store the state dict directly, others under a key.
+        if opt.spnn_weights in state:
+            sd = state[opt.spnn_weights]
+        elif isinstance(state, dict) and all(isinstance(v, torch.Tensor) for v in state.values()):
+            sd = state
+        else:
+            raise KeyError(f"Cannot find weights '{opt.spnn_weights}' in ckpt. "
+                           f"Top-level keys: {list(state.keys())[:10]}")
+        # Some ckpts prefix keys with 'spnn.' (imagenet_latent_ddnm training),
+        # others don't (spnn-diffusion training). Strip the prefix if present.
+        if any(k.startswith("spnn.") for k in sd):
+            stripped = {k[len("spnn."):]: v for k, v in sd.items() if k.startswith("spnn.")}
+        else:
+            stripped = dict(sd)
         missing, unexpected = spnn.load_state_dict(stripped, strict=False)
         if missing or unexpected:
             raise RuntimeError(
@@ -306,6 +362,10 @@ def main():
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
 
+    with open(os.path.join(opt.outdir, "settings.txt"), "w") as _f:
+        for _k in sorted(vars(opt).keys()):
+            _f.write(f"{_k}={getattr(opt, _k)}\n")
+
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     if not opt.from_file:
@@ -327,8 +387,10 @@ def main():
     assert os.path.isfile(opt.init_img)
     init_image = load_img(opt.init_img).to(device)
     init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
-    init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
 
+    # For inpainting: we should only see the masked image (y = A(init)), NOT the full init.
+    # Build mask/y first, then encode y_masked as the trajectory start. This makes the setup
+    # a real inpainting problem — the algorithm never gets to see the hole's original content.
     if opt.inpainting_mask:
         mask_img = Image.open(opt.inpainting_mask).convert("L").resize(
             (init_image.shape[-1], init_image.shape[-2]), resample=Image.NEAREST)
@@ -348,11 +410,38 @@ def main():
         Ap_inpaint = A_inpaint
         y_inpaint  = A_inpaint(init_image)                                # fixed measurement
 
+        # Optionally fill the hole via Gaussian-weighted average of nearby observed pixels
+        # (a smooth extrapolation) BEFORE encoding. This removes the "gray square" signal
+        # from the encoded init so the UNet's trajectory starts on-manifold.
+        # Note: BP still uses y_inpaint (true measurement, 0 in hole) — the fill only
+        # smooths the starting-latent, not the ongoing measurement constraint.
+        if opt.fill_hole_sigma > 0:
+            from torchvision.transforms.functional import gaussian_blur
+            fh_sigma = float(opt.fill_hole_sigma)
+            fh_ksize = 2 * int(3 * fh_sigma) + 1
+            blurred_y    = gaussian_blur(y_inpaint,     kernel_size=fh_ksize, sigma=fh_sigma)
+            blurred_mask = gaussian_blur(observed_mask, kernel_size=fh_ksize, sigma=fh_sigma)
+            fill = blurred_y / (blurred_mask + 1e-8)                     # normalize
+            y_encoded = observed_mask * init_image + (1.0 - observed_mask) * fill
+            print(f"Hole-fill applied — Gaussian sigma={fh_sigma}px (kernel={fh_ksize})")
+        else:
+            y_encoded = y_inpaint
+
+        # Encode as the trajectory starting point — the algorithm never sees the hole content.
+        init_latent = model.get_first_stage_encoding(model.encode_first_stage(y_encoded))
+        print("Inpainting mode: encoded y_masked (hole zeroed or extrapolated) as trajectory start.")
+
+        # Save what actually got encoded for debugging.
+        from torchvision.utils import save_image as _save_image_dbg
+        _save_image_dbg(((y_encoded.detach() + 1) / 2).clamp(0, 1),
+                        os.path.join(opt.outdir, "y_encoded.png"))
+
         sampler.bp_A  = A_inpaint
         sampler.bp_Ap = Ap_inpaint
         sampler.bp_y  = y_inpaint
         sampler.x0_smooth_sigma = opt.x0_smooth_sigma
 
+        # BP schedule dispatch — MUST run for inpainting mode.
         if opt.bp_schedule == "phased":
             def bp_lambda_fn(step_idx, lam=opt.bp_lambda):
                 if step_idx <= 2:
@@ -365,6 +454,21 @@ def main():
             sampler.bp_lambda_fn = bp_lambda_fn
             sched_desc = (f"phased — steps 0-2 lambda=1.0, steps 3-12 skip, "
                           f"then lambda={opt.bp_lambda} every 10 steps (13, 23, 33, ...)")
+        elif opt.bp_schedule == "stop_last":
+            _t_enc_local = min(int(opt.strength * opt.ddim_steps), opt.ddim_steps - 1)
+            _cutoff = _t_enc_local - opt.bp_stop_last_n
+            def bp_lambda_fn(step_idx, cutoff=_cutoff):
+                return 1.0 if step_idx < cutoff else 0.0
+            sampler.bp_lambda_fn = bp_lambda_fn
+            sched_desc = (f"stop_last — BP with lambda=1.0 for steps 0..{_cutoff-1}, "
+                          f"then skip (no BP, no encode/decode) for last "
+                          f"{opt.bp_stop_last_n} of {_t_enc_local} steps")
+        elif opt.bp_schedule == "every_n":
+            _n = max(1, int(opt.bp_every_n_steps))
+            def bp_lambda_fn(step_idx, n=_n):
+                return 1.0 if step_idx % n == 0 else 0.0
+            sampler.bp_lambda_fn = bp_lambda_fn
+            sched_desc = f"every_n — BP fires at step_idx % {_n} == 0 (lambda=1.0)"
         else:
             # No lambda_fn -> defaults to lambda=1.0 every step in ddim.py
             sched_desc = "every step, lambda=1.0"
@@ -372,16 +476,25 @@ def main():
               f"observed frac: {observed_mask.mean().item():.3f}")
         print(f"BP schedule: {sched_desc}")
 
+        # Save original init image + masked y for reference alongside outputs.
+        from torchvision.utils import save_image as _save_image
+        _save_image(((init_image.detach() + 1) / 2).clamp(0, 1),
+                    os.path.join(opt.outdir, "original.png"))
+        _save_image(((y_inpaint.detach() + 1) / 2).clamp(0, 1),
+                    os.path.join(opt.outdir, "y_masked.png"))
+    else:
+        # Non-inpainting img2img: keep original SDEdit behavior.
+        init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))
+
     if opt.debug_dir:
         os.makedirs(opt.debug_dir, exist_ok=True)
         sampler.debug_dir = opt.debug_dir
         print(f"Per-step debug enabled — x0_t / x0_t_hat -> {opt.debug_dir}")
 
-    sampler._step_idx = 0
     sampler.make_schedule(ddim_num_steps=opt.ddim_steps, ddim_eta=opt.ddim_eta, verbose=False)
 
     assert 0. <= opt.strength <= 1., 'can only work with strength in [0.0, 1.0]'
-    t_enc = int(opt.strength * opt.ddim_steps)
+    t_enc = min(int(opt.strength * opt.ddim_steps), opt.ddim_steps - 1)
     print(f"target t_enc is {t_enc} steps")
 
     precision_scope = autocast if opt.precision == "autocast" else nullcontext
@@ -392,6 +505,9 @@ def main():
                 all_samples = list()
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
+                        # Reset step counter each iteration so BP schedule fires
+                        # from step 0 for every sample (was buggy at n_iter > 1).
+                        sampler._step_idx = 0
                         uc = None
                         if opt.scale != 1.0:
                             uc = model.get_learned_conditioning(batch_size * [""])
@@ -403,7 +519,9 @@ def main():
                         z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
                         # decode it
                         samples = sampler.decode(z_enc, c, t_enc, unconditional_guidance_scale=opt.scale,
-                                                 unconditional_conditioning=uc,)
+                                                 unconditional_conditioning=uc,
+                                                 travel_length=opt.travel_length,
+                                                 travel_repeat=opt.travel_repeat,)
 
                         x_samples = model.decode_first_stage(samples)
                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
